@@ -1,4 +1,4 @@
-#======Use this middleware only if you are using a multi-tenant architecture with separate schemas per tenant. and every tenant has all their information stored in their schema and there is no need for a public schema======#
+# ======Use this middleware only if you are using a multi-tenant architecture with separate schemas per tenant. and every tenant has all their information stored in their schema and there is no need for a public schema======#
 
 
 # from django.db import connection

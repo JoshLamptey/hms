@@ -4,6 +4,7 @@ from django.utils.translation import gettext_lazy as _
 from django.utils import timezone
 from datetime import timedelta
 from django.contrib.auth import get_user_model
+from phonenumber_field.modelfields import PhoneNumberField
 import uuid
 import secrets
 import arrow
@@ -16,9 +17,6 @@ class Tenant(models.Model):
     uid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     name = models.CharField(max_length=150, unique=True, null=False, blank=False)
     schema_name = models.CharField(max_length=63, unique=True)
-    uid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
     is_active = models.BooleanField(default=False)
     org_slug = models.SlugField(max_length=255)
     logo = models.ImageField(
@@ -29,6 +27,7 @@ class Tenant(models.Model):
         null=True,
     )
     email = models.EmailField(verbose_name=t("Tenant Email"), unique=True)
+    phone_number = PhoneNumberField()
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -105,8 +104,8 @@ class License(models.Model):
         verbose_name_plural = _("Licenses")
         constraints = [
             models.UniqueConstraint(
-                fields=["license_type", "tenant"],
-                name="unique_license_per_tenant",
+                fields=["license_key", "tenant"],
+                name="unique_license_key_per_tenant",
             )
         ]
         ordering = ["-created_at"]
