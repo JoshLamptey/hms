@@ -1,7 +1,7 @@
 from django.contrib import admin
 from apps.users.models import (
     User,
-    UserGroups,
+    UserGroup,
     UserRole,
 )
 
@@ -14,7 +14,7 @@ class BaseAdmin(admin.ModelAdmin):
 
 
 @admin.register(User)
-@admin.register(UserGroups)
+@admin.register(UserGroup)
 @admin.register(UserRole)
 class UserAdmin(BaseAdmin):
     pass

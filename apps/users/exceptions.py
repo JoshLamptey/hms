@@ -3,8 +3,8 @@ from rest_framework.response import Response
 from rest_framework.exceptions import Throttled
 from apps.users.models import UserRateLimitFlag
 from django.utils import timezone
-from apps.notifications.utils import send_rate_limit_warning_sms
 
+# from apps.notifications.utils import send_rate_limit_warning_sms
 
 
 def custom_exception_handler(exc, context):
@@ -29,30 +29,27 @@ def custom_exception_handler(exc, context):
     return response
 
 
-
-
 def handle_rate_limit_flag(user):
     flag, created = UserRateLimitFlag.objects.get_or_create(
         user=user,
         reason="Exceeded rate limit",
     )
-    
+
     if not created:
         flag.count += 1
         flag.last_flagged_at = timezone.now()
         flag.save()
-    
-    if flag.count == 2:
-        send_rate_limit_warning_sms.delay(user.uid)
-        flag.last_flagged_at = timezone.now()
-        flag.save()
-    
+
+    # if flag.count == 2:
+    #     send_rate_limit_warning_sms.delay(user.uid)
+    #     flag.last_flagged_at = timezone.now()
+    #     flag.save()
+
     if flag.count >= 3 and not flag.is_blocked:
         user.is_blocked = True
         user.blocked_at = timezone.now()
         user.save()
-        
+
         flag.is_blocked = True
         flag.last_flagged_at = timezone.now()
         flag.save()
-

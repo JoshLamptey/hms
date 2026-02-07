@@ -16,7 +16,7 @@ User = get_user_model()
 class Tenant(models.Model):
     uid = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     name = models.CharField(max_length=150, unique=True, null=True, blank=True)
-    address = models.CharField(max_length=150, null=True,blank=True)
+    address = models.CharField(max_length=150, null=True, blank=True)
     schema_name = models.CharField(max_length=63, unique=True)
     is_active = models.BooleanField(default=False)
     org_slug = models.SlugField(max_length=255)
