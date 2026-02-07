@@ -1,6 +1,6 @@
 from django.db import connection
 from functools import wraps
-from client.models import Tenant
+from apps.client.models import Tenant
 from django.core.cache import cache
 from rest_framework.exceptions import PermissionDenied, APIException
 

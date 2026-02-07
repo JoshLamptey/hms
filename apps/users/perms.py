@@ -24,23 +24,22 @@ class CustomPermission(BasePermission):
     - Organization context
     - License validation
     """
-    
+
     def has_permission(self, request, view):
         user = request.user
-        
+
         if not user or not user.is_authenticated:
             return False
-        
+
         if user.is_blocked:
-            raise PermissionDenied("Your account is temporarily blocked. Please contact support.")
-        
-        
-        
+            raise PermissionDenied(
+                "Your account is temporarily blocked. Please contact support."
+            )
+
         if hasattr(user, "role") and user.role:
             if user.role.name == UserRole.Role.SUPER_ADMIN:
                 return True
-        
-        
+
         model_name = view.content_model._meta.model_name
         permission_map = {
             "create": f"add_{model_name}",
@@ -73,43 +72,40 @@ class CustomPermission(BasePermission):
                     f"{content_type.app_label}.{required_permission}"
                 ):
                     return False
-                
-        
+
         # Check organization context
-        if(
-            hasattr(view,"check_organization_context") and
-            view.check_organization_context
+        if (
+            hasattr(view, "check_organization_context")
+            and view.check_organization_context
         ):
             if not self._check_organization_context(request, view):
                 return False
-            
-        
+
         # License validation
-        
+
         if not License.objects.filter(
-            users = request.user,
-            status = License.Status.ACTIVE,
-            expiry_date__gt = timezone.now()
+            users=request.user,
+            status=License.Status.ACTIVE,
+            expiry_date__gt=timezone.now(),
         ).exists():
-            raise PermissionDenied("Your organization does not have a valid license. Please contact support.")
-        
+            raise PermissionDenied(
+                "Your organization does not have a valid license. Please contact support."
+            )
+
         return True
-    
-    
+
     def _check_organization_context(self, request, view):
         """Helper method to verify organization context for the request"""
         user = request.user
         organisation = getattr(user, "tenant", None)
-        
+
         if not organisation:
             return False
-        
+
         # If the view has an organization field in its queryset, filter by it
         if hasattr(view, "get_queryset"):
             queryset = view.get_queryset()
             if hasattr(queryset.model, "organisation"):
                 return queryset.filter(organisation=organisation).exists()
-        
+
         return True
-    
-    

@@ -26,6 +26,7 @@ SECRET_KEY = config("SECRET_KEY", cast=str)
 DEBUG = True
 
 ALLOWED_HOSTS = []
+CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS").split(",")
 
 
 # Application definition
@@ -41,22 +42,25 @@ INSTALLED_APPS = [
     "rest_framework",
     "drf_spectacular",
     "post_office",
+    "csp",
     "django_extensions",
     "django_celery_results",
     "django_celery_beat",
     "apps.users",
-    "apps.client"
+    "apps.client",
 ]
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
+    "csp.middleware.CSPMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "church.middleware.PermissionsPolicyMiddleware",
 ]
 
 ROOT_URLCONF = "hms.urls"
@@ -64,7 +68,9 @@ ROOT_URLCONF = "hms.urls"
 TEMPLATES = [
     {
         "BACKEND": "django.template.backends.django.DjangoTemplates",
-        "DIRS": [],
+        "DIRS": [
+            BASE_DIR / 'templates',
+            ],
         "APP_DIRS": True,
         "OPTIONS": {
             "context_processors": [
@@ -94,6 +100,8 @@ DATABASES = {
     },
 }
 
+DATABASE_ROUTERS = ["apps.client.routers.TenantRouter"]
+
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
@@ -111,16 +119,29 @@ CHANNEL_LAYERS = {
     },
 }
 
-
 REST_FRAMEWORK = {
-    "DEFAULT_AUTHENTICATION_CLASSES": [
-        # "rest_framework.authentication.SessionAuthentication",
-    ],
-    'EXCEPTION_HANDLER': 'apps.users.exceptions.custom_exception_handler',
+    "DEFAULT_AUTHENTICATION_CLASSES": ["apps.users.auth.JWTAuthentication"],
+    "EXCEPTION_HANDLER": "apps.users.exceptions.custom_exception_handler",
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
 
+
+    # uncomment after setting up rate
+    # "DEFAULT_THROTTLE_CLASSES": [
+    #     "rest_framework.throttling.UserRateThrottle",
+    #     "rest_framework.throttling.ScopedRateThrottle",
+    # ],
+    # "DEFAULT_THROTTLE_RATES": {
+    #     "user": "100/min",
+
+    #     # Auth endpoints
+    #     "login": "3/min",
+    #     "passwordless_login": "3/min",
+    #     "forgot_password": "3/min",
+    #     "refresh_token": "2/min",
+    # },
 }
+
 
 
 SPECTACULAR_SETTINGS = {
@@ -139,6 +160,9 @@ AUTH_PASSWORD_VALIDATORS = [
     },
     {
         "NAME": "django.contrib.auth.password_validation.MinimumLengthValidator",
+        "OPTIONS": {
+            "min_length": 8,
+        },
     },
     {
         "NAME": "django.contrib.auth.password_validation.CommonPasswordValidator",
@@ -146,7 +170,11 @@ AUTH_PASSWORD_VALIDATORS = [
     {
         "NAME": "django.contrib.auth.password_validation.NumericPasswordValidator",
     },
+    {
+        "NAME": "apps.users.validators.AlphaNumericSymbolValidator",
+    },
 ]
+
 
 
 # Internationalization
@@ -175,13 +203,50 @@ MEDIA_URL = "/media/"
 
 MEDIA_ROOT = BASE_DIR / "media"
 
+
+#uncomment later
+# LOGGING = {
+#     "version": 1,
+#     "disable_existing_loggers": False,
+#     "formatters": {
+#         "verbose": {
+#             "format": "{levelname} {asctime} {module} {message}",
+#             "style": "{",
+#         },
+#     },
+#     "handlers": {
+#         "console": {
+#             "class": "logging.StreamHandler",
+#             "formatter": "verbose",
+#         },
+#         "file": {
+#             "class": "logging.FileHandler",
+#             "filename": "./debug.log",
+#             "formatter": "verbose",
+#         },
+#     },
+#     "loggers": {
+#         "django": {
+#             "handlers": ["console", "file"],
+#             "level": "INFO",
+#         },
+#         "apps": {
+#             "handlers": ["console", "file"],
+#             "level": "DEBUG",
+#             "propagate": True,
+#         },
+#     },
+# }
+
+
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
-# AUTH_USER_MODEL = "users.User"
+
+AUTH_USER_MODEL = "users.User"
 
 POST_OFFICE = {
     'CELERY_ENABLED': True,
@@ -200,3 +265,24 @@ EMAIL_HOST_USER = config("EMAIL_HOST_USER")
 DEFAULT_FROM_EMAIL = config("DEFAULT_FROM_EMAIL")
 EMAIL_HOST_PASSWORD = config("EMAIL_HOST_PASSWORD")
 EMAIL_BACKEND = config("EMAIL_BACKEND")
+
+
+# --- Permissions Policy ---
+
+SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_BROWSER_XSS_FILTER = True
+X_FRAME_OPTIONS = "DENY"
+
+
+PERMISSIONS_POLICY = {
+    "accelerometer": [],
+    "camera": [],
+    "geolocation": [],
+    "gyroscope": [],
+    "magnetometer": [],
+    "microphone": [],
+    "payment": [],
+    "usb": [],
+    "fullscreen": ["self"],
+}
