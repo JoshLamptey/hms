@@ -28,6 +28,8 @@ class UserGroup(models.Model):
         blank=True,
         related_name="user_groups",
     )
+    is_global = models.BooleanField(default=False)
+    name = models.CharField(max_length=150, unique=True)
     description = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

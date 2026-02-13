@@ -223,5 +223,179 @@ class UserGroupViewset(viewsets.ModelViewSet):
         
         return qs.filter(
             is_global = False,
-            
+            tenant__org_slug = user.org_slug,
         )
+        
+    def list(self, request, *args, **kwargs):
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            "success": True,
+            "info": serializer.data,
+        },status=status.HTTP_200_OK)
+        
+        
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        
+        return Response({
+            "success": True,
+            "info": serializer.data,
+        },status=status.HTTP_200_OK)
+        
+    
+    def create(self, request, *args, **kwargs):
+        try:
+            data = request.data
+            name = data.get("name")
+            permissions = data.get("permissions", [])
+            
+            tenant = request.user.tenant
+            
+            if not name:
+                return Response({
+                    "success": False,
+                    "info": "Name is required.",
+                },status=status.HTTP_400_BAD_REQUEST)
+            
+            # Check if group already exists with or without organization    
+            group_filter = UserGroup.objects.filter(name=name)
+            if tenant:
+                group_filter = group_filter.filter(tenant=tenant)
+            else:
+                group_filter = group_filter.filter(tenant__isnull=True)
+            
+            if group_filter.exists():
+                return Response({
+                    "success": False,
+                    "info": " User Group already exists.",
+                },status=status.HTTP_400_BAD_REQUEST)
+                
+            # Create the group with or without organization
+            
+            group_data = {"name": name}
+            if tenant:
+                group_data["tenant"] = tenant
+            
+            if request.user.role == UserRole.Role.SUPER_ADMIN:
+                group_data["is_global"] = True
+            
+            group = UserGroup.objects.create(**group_data)
+            
+            # Assign permissions to the group
+            if permissions:
+                valid_permissions = Permission.objects.filter(id__in=permissions)
+                group.permissions.set(valid_permissions)
+            
+            return Response({
+                "success": True,
+                "info": "User Group created successfully.",
+            },status=status.HTTP_201_CREATED)
+        
+        except Exception as e:
+            logger.error(f"Error creating user group: {e}")
+            return Response({
+                "success": False,
+                "info": "Failed to create user group.",
+            },status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+    
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="assign-user-group",
+    )
+    def assign_user_group(self, request, *args, **kwargs):
+        try:
+            data = request.data
+            group_id = data.get("group_id")
+            users = data.get("users",[])
+            
+            if not group_id:
+                return Response({
+                    "success": False,
+                    "info": "Group ID is required.",
+                },status=status.HTTP_400_BAD_REQUEST)
+            
+            if not isinstance(users, list):
+                return Response(
+                    {"success": False, "info": "users should be a list"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            
+            user_group = UserGroup.objects.filter(id=group_id).first()
+            
+            if not user_group:
+                return Response({
+                    "success": False,
+                    "info": "User Group does not exist.",
+                },status=status.HTTP_400_BAD_REQUEST)
+            
+            for user in users:
+                user_group.users.add(user)
+            
+            user_group.save()
+            
+            return Response({
+                "success": True,
+                "info": "User Group assigned successfully.",
+            },status=status.HTTP_200_OK)
+        
+        except Exception as e:
+            logger.error(f"Error assigning user group: {e}")
+            return Response({
+                "success": False,
+                "info": "Failed to assign user group.",
+            },status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="remove-user-group",
+    )
+    def remove_user_group(self, request, *args, **kwargs):
+        try:
+            data = request.data
+            group_id = data.get("group_id")
+            users = data.get("users",[])
+            
+            if not group_id:
+                return Response({
+                    "success": False,
+                    "info": "Group ID is required.",
+                },status=status.HTTP_400_BAD_REQUEST)
+            
+            if not isinstance(users, list):
+                return Response({
+                    "success": False,
+                    "info": "users should be a list",
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            
+            user_group = UserGroup.objects.filter(id=group_id).first()
+            
+            if not user_group:
+                return Response({
+                    "success": False,
+                    "info": "User Group does not exist.",
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            user_group.users.remove(*users)
+            
+            return Response({
+                "success": True,
+                "info": "User Group removed successfully.",
+            }, status=status.HTTP_410_GONE)
+            
+        
+        except Exception as e:
+            logger.error(f"Error removing user group: {e}")
+            return Response({
+                "success": False,
+                "info": "Failed to remove user group.",
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            
+            
