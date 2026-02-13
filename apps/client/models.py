@@ -237,9 +237,6 @@ class LicenseHistory(models.Model):
         return f"{self.license}"
 
 
-
-
-
 class RefreshToken(models.Model):
     jti = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     uid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
