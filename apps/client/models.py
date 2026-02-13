@@ -235,3 +235,36 @@ class LicenseHistory(models.Model):
 
     def __str__(self):
         return f"{self.license}"
+
+
+
+
+
+class RefreshToken(models.Model):
+    jti = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    uid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    user = models.ForeignKey(
+        "users.User", on_delete=models.CASCADE, related_name="refresh_tokens"
+    )
+    token = models.CharField(max_length=500, unique=True)
+    is_revoked = models.BooleanField(default=False)
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(blank=True, null=True)
+
+    def is_expired(self):
+        return timezone.now() >= self.expires_at
+
+
+class UserRateLimitFlag(models.Model):
+    uid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    user = models.ForeignKey(
+        "users.User", on_delete=models.CASCADE, related_name="rate_limit_flags"
+    )
+    reason = models.TextField(max_length=500, db_index=True)
+    count = models.IntegerField(default=0)
+    last_flagged_at = models.DateTimeField(auto_now=True)
+    is_blocked = models.BooleanField(default=False)
+
+    class Meta:
+        unique_together = ("user", "reason")

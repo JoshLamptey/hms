@@ -6,7 +6,7 @@ import random
 from rest_framework.response import Response
 from rest_framework.authentication import BaseAuthentication
 from rest_framework.exceptions import AuthenticationFailed
-from apps.users.models import RefreshToken
+from apps.client.models import RefreshToken
 from decouple import config
 from django.core.cache import cache
 from apps.users.utils import send_notification

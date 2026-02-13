@@ -1,7 +1,7 @@
 from rest_framework.views import exception_handler
 from rest_framework.response import Response
 from rest_framework.exceptions import Throttled
-from apps.users.models import UserRateLimitFlag
+from apps.client.models import UserRateLimitFlag
 from django.utils import timezone
 
 # from apps.notifications.utils import send_rate_limit_warning_sms
