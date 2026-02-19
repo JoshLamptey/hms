@@ -19,6 +19,7 @@ User = get_user_model()
 class CustomPermission(BasePermission):
     """
     Handles:
+    -Token Validation
     - Role-based access
     - Group & model permissions
     - Organization context
@@ -26,6 +27,7 @@ class CustomPermission(BasePermission):
     """
 
     def has_permission(self, request, view):
+
         user = request.user
 
         if not user or not user.is_authenticated:
