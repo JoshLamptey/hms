@@ -2,10 +2,11 @@ import logging
 import jwt
 import arrow
 import uuid
+import re
 import random
 from rest_framework.response import Response
 from rest_framework.authentication import BaseAuthentication
-from rest_framework.exceptions import AuthenticationFailed
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from apps.client.models import RefreshToken
 from decouple import config
 from django.core.cache import cache
@@ -192,11 +193,53 @@ class Authenticator:
             }
         )
 
+    def send_reset_password(self, field, password):
+        try:
+            if "@" in field:
+                if not re.match(r"[^@]+@[^@]+\.[^@]+", field):
+                    return Response(
+                        {
+                            "success": False,
+                            "info": "Invalid email format.",
+                        }
+                    )
+
+                context = {
+                    "template": "reset_password",
+                    "subject": "Reset Password",
+                    "context": {"password": password},
+                }
+
+                mail = send_notification.delay(
+                    recipient=field,
+                    context=context,
+                )
+                logger.info(f"Reset password email sent to {field}")
+
+            else:
+                if not re.match(r"^\+?\d{7,15}$", field):
+                    return Response(
+                        {
+                            "success": False,
+                            "info": "Invalid phone number format.",
+                        }
+                    )
+
+                # sms = notify.send_notification.delay(
+                #     medium="sms",
+                #     recipient=field,
+                #     message = f"Your HMS password is {password}. It is valid for  3hours. Please Change it after login ",
+                # )
+
+                logger.info(f"Reset password sms sent to {field}")
+
+        except Exception as e:
+            logger.error(f"Error sending reset Password: {e}")
+            raise e
+
 
 class JWTAuthentication(BaseAuthentication):
-
     def authenticate(self, request):
-
         auth_header = request.headers.get("Authorization")
 
         if not auth_header:
@@ -205,9 +248,9 @@ class JWTAuthentication(BaseAuthentication):
         try:
             prefix, token = auth_header.split(" ")
             if prefix.lower() != "bearer":
-                raise AuthenticationFailed("Invalid token prefix.")
+                raise AuthenticationFailed("invalid token prefix")
         except ValueError:
-            raise AuthenticationFailed("Invalid authorization header format.")
+            raise AuthenticationFailed("Invalid authorization header")
 
         try:
             payload = jwt.decode(
@@ -216,24 +259,30 @@ class JWTAuthentication(BaseAuthentication):
                 algorithms=["HS256"],
             )
 
+            jti = payload.get("jti")
+            if cache.get(f"blacklist:access:{jti}"):
+                raise PermissionDenied("Access token has been revoked")
+
             if payload.get("type") != "access":
-                raise AuthenticationFailed("Invalid token type.")
+                raise AuthenticationFailed("Invalid token type")
 
             try:
-                logged_user = User.objects.get(id=payload["user_id"])
+                logged_user = User.objects.get(
+                    id=payload["user_id"], uid=payload["user_uid"]
+                )
             except User.DoesNotExist:
-                raise AuthenticationFailed("User not found.")
+                raise AuthenticationFailed("User not found")
 
             if logged_user.is_blocked:
-                raise AuthenticationFailed("User account is blocked.")
+                raise AuthenticationFailed(
+                    "Sorry, Your account has been blocked.\n Please contact your admin."
+                )
 
             cache.set(f"org_slug:{logged_user.id}", logged_user.org_slug)
 
-            return (logged_user, None)
+            return (logged_user, payload)
 
         except jwt.ExpiredSignatureError:
-            raise AuthenticationFailed("Token has expired.")
+            raise AuthenticationFailed("Access token expired")
         except jwt.InvalidTokenError:
-            raise AuthenticationFailed("Invalid token.")
-        except Exception as e:
-            raise AuthenticationFailed(str(e))
+            raise AuthenticationFailed("Invalid token")

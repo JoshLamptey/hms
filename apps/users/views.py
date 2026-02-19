@@ -17,7 +17,7 @@ from apps.users.auth import Authenticator
 from rest_framework import viewsets, status, permissions
 from rest_framework.response import Response
 from django.core.exceptions import ObjectDoesNotExist
-from apps.users.models import UserGroup, UserRole
+from apps.users.models import UserGroup, UserRole, User
 from apps.users.perms import CustomPermission
 from apps.users.serializers import (
     UserRoleSerializer,
@@ -28,15 +28,20 @@ from apps.users.serializers import (
     UserGroupCreateUpdateSerializer,
     UserGroupListSerializer,
 )
+from rest_framework.throttling import (
+    ScopedRateThrottle,
+    UserRateThrottle,
+)
+from rest_framework.exceptions import PermissionDenied
 from apps.users.utils import send_login_credentials
 from decouple import config
 from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth.hashers import check_password, make_password
 from django.core.exceptions import ValidationError
 from django.contrib.auth import get_user_model
 
 auth = Authenticator()
 logger = logging.getLogger(__name__)
-User = get_user_model()
 
 
 class UserRoleViewset(viewsets.ModelViewSet):
@@ -447,3 +452,1169 @@ class UserGroupViewset(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+class UserViewset(viewsets.ModelViewSet):
+    content_model = User
+    queryset = User.objects.select_related("role").all()
+    permission_classes = [CustomPermission]
+    lookup_field = "uid"
+    throttle_classes = [ScopedRateThrottle, UserRateThrottle]
+
+    def get_serializer(self):
+        if self.action == "create":
+            return UserCreateSerializer
+
+        if self.action in ["update", "partial_update"]:
+            obj = self.get_object()
+
+            if obj.id == self.request.user.id:
+                return UserSelfUpdateSerializer
+
+            return UserAdminUpdateSerializer
+
+        return UserListSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+
+        if user.role.name == "super_admin":
+            return self.queryset
+
+        return self.queryset.filter(tenant__org_slug=user.org_slug)
+
+    def check_throttles(self, request):
+        method = getattr(self, self.action)
+
+        if hasattr(method, "throttle_scope"):
+            self.throttle_scope = method.throttle_scope
+        super().check_throttles(request)
+
+    def get_object(self):
+        obj = super().get_object()
+
+        user = self.request.user
+
+        if user.role.name in ["admin_user", "super_admin"]:
+            return obj
+
+        if obj.id != user.id:
+            raise PermissionDenied("You do not have permission to access this User")
+
+        return obj
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop("partial", False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+
+        forbidden_fields = {"tenant", "org_slug"}
+
+        if forbidden_fields & set(serializer.validated_data.keys()):
+            raise PermissionDenied("Organisation fields cannot be modified.")
+
+        if instance.id == user.id:
+            forbidden_self_fields = {
+                "role",
+                "status",
+                "is_blocked",
+                "login_enabled",
+            }
+
+            if forbidden_self_fields & set(serializer.validated_data.keys()):
+                raise PermissionDenied("You cannot modify administrative fields.")
+
+        # remove before documentation
+        logger.warning(f"Validated data keys: {list(serializer.validated_data.keys())}")
+
+        self.perform_update(serializer)
+
+        # updated_fields = serializer.validated_data.keys()
+
+        # add the sync to other user branches that will be created later
+        # sync_user_to_staff(
+        #     user=instance,
+        #     org_slug=instance.org_slug,
+        #     updated_fields=updated_fields,
+        # )
+
+        return Response(
+            {
+                "success": True,
+                "info": "Field Updated Successfully",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+
+        serializer = self.get_serializer(instance)
+
+        return Response(
+            {
+                "success": True,
+                "info": serializer.data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def list(self, request, *args, **kwargs):
+        if request.user.role.name not in ["super_admin"]:
+            raise PermissionDenied("You do not have permission to view this list.")
+
+        queryset = self.filter_queryset(self.get_queryset())
+        serializer = self.get_serializer(queryset, many=True)
+
+        return Response(
+            {
+                "success": True,
+                "info": serializer.data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    def create(self, request, *args, **kwargs):
+        data = request.data
+
+        required_fields = [
+            "first_name",
+            "last_name",
+            "role",
+            "email",
+            "phone_number",
+            "gender",
+            "tenant",
+        ]
+
+        for field in required_fields:
+            if not data.get(field):
+                return Response(
+                    {
+                        "success": False,
+                        "info": f"{field} is required.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        tenant = Tenant.objects.filter(id=data.get("tenant")).first()
+
+        if not tenant:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Tenant does not exist.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        data["org_slug"] = tenant.org_slug
+
+        if User.objects.filter(
+            Q(email=data.get("email")) | Q(phone_number=data.get("phone_number")),
+            org_slug=tenant.org_slug,
+        ).exists():
+            return Response(
+                {
+                    "success": False,
+                    "info": "User already exists.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if data.get("password"):
+            try:
+                validate_password(data.get("password"))
+                hashed_password = make_password(data.get("password"))
+                data["password"] = hashed_password
+            except ValidationError as e:
+                return Response(
+                    {
+                        "success": False,
+                        "info": e.messages,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        serializer = self.get_serializer(data=data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+
+        return Response(
+            {
+                "success": True,
+                "info": "User created successfully.",
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+    @action(detail=False, methods=["post"], url_path="update-password")
+    def update_password(self, request, pk=None):
+        print(request.data)
+        data = request.data
+        field = data.get("field")
+        password = data.get("password")
+        confirm_password = data.get("confirm_password")
+
+        user = request.user
+
+        if not field:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Field is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if field not in [user.email, user.phone_number]:
+            return Response(
+                {"success": False, "info": "You can only update your own password."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if not password:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Password is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not confirm_password:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Confirm Password is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if password != confirm_password:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Passwords do not match.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            validate_password(password, user=user)
+            hashed_password = make_password(password)
+            user.password = hashed_password
+        except ValidationError as e:
+            return Response(
+                {
+                    "success": False,
+                    "info": e.messages,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user.password_changed = True
+        user.login_enabled = True
+        user.save(update_fields=["password", "password_changed", "login_enabled"])
+
+        RefreshToken.objects.filter(user=user).update(is_revoked=True)
+
+        return Response(
+            {
+                "success": True,
+                "info": "Password updated successfully. Please re-login!",
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(
+        detail=False,
+        methods=["post"],
+        permission_classes=[permissions.AllowAny],
+        url_path="forgot-password",
+        throttle_classes=[ScopedRateThrottle],
+    )
+    def forgot_password(self, request, pk=None):
+        data = request.data
+        field = data.get("field")
+
+        if not field:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Field is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = User.objects.filter(Q(email=field) | Q(phone_number=field)).first()
+
+        if not user:
+            logger.warning(f"User with field {field} does not exist.")
+            return Response(
+                {"success": True, "info": f"OTP sent successfully to {field}"},
+                status=status.HTTP_200_OK,
+            )
+
+        try:
+            if "@" in field:
+                if not re.match(r"[^@]+@[^@]+\.[^@]+", field):
+                    return Response(
+                        {
+                            "success": False,
+                            "info": "Invalid email format.",
+                        }
+                    )
+                auth.send_otp(email=field)
+
+            elif re.match(r"^\+?\d{7,15}$", field):
+                auth.send_otp(phone=field)
+
+            else:
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Invalid phone number format.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            return Response(
+                {"success": True, "info": f"OTP sent successfully to {field}"},
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.error(f"Error sending OTP: {e}")
+            return Response(
+                {
+                    "success": False,
+                    "info": "Failed to send OTP.",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    forgot_password.throttle_scope = "forgot_password"
+
+    @action(
+        detail=False,
+        methods=["post"],
+        permission_classes=[permissions.AllowAny],
+        url_path="verify-otp",
+    )
+    def verify_otp(self, request, pk=None):
+        data = request.data
+        field = data.get("field")
+        otp = data.get("otp")
+
+        if not field:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Field is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not otp:
+            return Response(
+                {
+                    "success": False,
+                    "info": "OTP is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if "@" in field:
+            verify = auth.verify_otp(email=field, user_entered_otp=otp)
+        else:
+            verify = auth.verify_otp(phone=field, user_entered_otp=otp)
+
+        if verify:
+            return Response(
+                {
+                    "success": True,
+                    "info": "OTP verified successfully.",
+                },
+                status=status.HTTP_200_OK,
+            )
+        else:
+            return Response(
+                {
+                    "success": False,
+                    "info": "OTP verification failed. Please re-check your OTP and try again",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    def check_user_license_status(
+        self, org_slug: str, email: str, phone: str = None
+    ) -> bool:
+        """Check if the user exists in any valid active license for the organization.
+
+        Args:
+            org_slug: The organization slug to check licenses for
+            email: The user's email to verify against license users
+
+        Returns:
+            bool: True if the user exists in any valid active license, False otherwise
+        """
+        try:
+            user = User.objects.filter(Q(email=email) | Q(phone_number=phone)).first()
+            if not user:
+                logger.warning(f"User with email {email} does not exist.")
+                return False
+
+            tenant = Tenant.objects.filter(org_slug=org_slug).first()
+            if not tenant:
+                logger.warning(f"Tenant with slug {org_slug} does not exist.")
+                return False
+
+            now = arrow.utcnow().datetime
+
+            valid_license = (
+                License.objects.filter(
+                    tenant=tenant,
+                    status=License.LicenseStatus.ACTIVE,
+                    expiry_date__gte=now,
+                )
+                .order_by("-expiry_date")
+                .first()
+            )
+
+            if valid_license:
+                logger.info(f"Valid license found until {valid_license.expiry_date}")
+
+                if not valid_license.users.filter(pk=user.pk).exists():
+                    logger.warning(f"{user} failed license check")
+                    # valid_license.users.add(user)
+                    # logger.info(f"User {user} added to license users")
+                    return False
+
+                logger.info(f"{user} passed license check")
+                return True
+
+            logger.info("No valid license found for user")
+            return False
+
+        except Exception as e:
+            logger.error(f"Error checking user license status: {e}")
+            return False
+
+    @action(
+        detail=False,
+        methods=["post"],
+        permission_classes=[permissions.AllowAny],
+        url_path="login",
+        throttle_classes=[ScopedRateThrottle],
+    )
+    def login(self, request, pk=None):
+        data = request.data
+        field = data.get("field")
+        password = data.get("password")
+
+        if not field:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Field is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not password:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Password is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = User.objects.filter(Q(email=field) | Q(phone_number=field)).first()
+
+        if not user:
+            return Response(
+                {"success": False, "info": "Invalid Email or Password"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        now = arrow.now().datetime
+
+        if not user.role.name == "super_admin":
+            if not user.password_changed and user.password_expiry <= now:
+                logger.warning(
+                    f"Blocked: expired password for {user.email}, expiry={user.password_expiry}, now={now}"
+                )
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Password expired. Contact your Administrator please",
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            if not user.login_enabled:
+                logger.warning(f"Blocked: login disabled for {user.email}")
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Login disabled, Contact your Administrator please",
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            license_status = self.check_user_license_status(
+                user.org_slug, email=user.email, phone=user.phone_number
+            )
+
+            if not license_status and user.role.name != "super_admin":
+                return Response(
+                    {"success": False, "info": "Your organisation license is expired"},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            # put this after you have created customers and staff
+            # profile_picture = user.image.url if user.image else None
+            # branch_id = None
+
+            # if not profile_picture or not branch_id:
+            #     member_instance = fetch_instances(
+            #         Member, user.org_slug, {"phone_number": user.phone_number}
+            #     )
+
+            #     if member_instance:
+            #         member = member_instance[0]
+
+            #         if member.image:
+            #             user.image = member.image
+            #             user.save(update_fields=["image"])
+            #             print("Profile picture found in Member:", profile_picture)
+
+            #         if member.branch_id:
+            #             try:
+            #                 # fetch branch name safely from schema
+            #                 branch_instance = fetch_instances(
+            #                     Branch, user.org_slug, {"id": member.branch_id}
+            #                 )
+            #                 if branch_instance:
+            #                     branch_id = branch_instance[0].id
+            #             except ObjectDoesNotExist:
+            #                 branch_id = None
+
+            # if profile_picture:
+            #     profile_picture = config("BASE_URL") + profile_picture
+            # else:
+            #     profile_picture = None
+
+            if user.is_blocked:
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Your account is blocked, Contact your admin please",
+                    },
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
+            checker = check_password(password, user.password)
+            if checker:
+                user.last_login = now
+                user.save(update_fields=["last_login"])
+
+                access_token = auth.generate_access_token(user)
+                refresh_token = auth.generate_refresh_token(user)
+
+                if user.password_changed:
+                    return Response(
+                        {
+                            "success": True,
+                            "info": "User logged in successfully",
+                            "password_changed": True,
+                            "access_token": access_token,
+                            "refresh_token": refresh_token,
+                            "role": user.role.name,
+                            # "branch_id": branch_id,
+                            # "profile_picture": profile_picture
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+
+                else:
+                    return Response(
+                        {
+                            "success": True,
+                            "info": "User logged in successfully",
+                            "password_changed": False,
+                            "access_token": access_token,
+                            "refresh_token": refresh_token,
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+
+            else:
+                return Response(
+                    {"success": False, "info": "Invalid Email or Password"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        # profile_picture = user.image.url if user.image else None
+        # if not profile_picture:
+        #     member_instance = fetch_instances(
+        #         Member, user.org_slug, {"email": user.email}
+        #     )
+
+        #     if member_instance:
+        #         member = member_instance[0]
+
+        #         if member.image:
+        #             user.image = member.image
+        #             user.save(update_fields=["image"])
+        #             print("Profile picture found in Member:", profile_picture)
+
+        #     if profile_picture:
+        #         profile_picture = config("BASE_URL") + profile_picture
+        #     else:
+        #         profile_picture = None
+
+        checker = check_password(password, user.password)
+        if checker:
+            user.last_login = now
+            user.save(update_fields=["last_login"])
+            access_token = auth.generate_access_token(user)
+            refresh_token = auth.generate_refresh_token(user)
+
+            if user.password_changed:
+                return Response(
+                    {
+                        "success": True,
+                        "info": "User logged in successfully",
+                        "password_changed": True,
+                        "access_token": access_token,
+                        "refresh_token": refresh_token,
+                        "role": user.role.name,
+                        # "profile_picture" : profile_picture
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            else:
+                return Response(
+                    {
+                        "success": True,
+                        "info": "User logged in successfully",
+                        "password_changed": False,
+                        "access_token": access_token,
+                        "refresh_token": refresh_token,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+        return Response(
+            {
+                "success": False,
+                "info": "Invalid Email or Password",
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    login.throttle_scope = "login"
+
+    @action(
+        detail=False,
+        methods=["post"],
+        permission_classes=[permissions.AllowAny],
+        url_path="passwordless-login",
+        throttle_classes=[ScopedRateThrottle],
+    )
+    def login_without_password(self, request, *args, **kwargs):
+        try:
+            data = request.data
+
+            field = data.get("field")
+
+            if not field:
+                return Response(
+                    {"success": False, "info": "Field is required."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            user = User.objects.filter(Q(email=field) | Q(phone_number=field)).first()
+
+            if not user:
+                return Response(
+                    {
+                        "success": True,
+                        "info": f"OTP sent successfully to {field}, If user exists",
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            license_status = self.check_user_license_status(
+                user.org_slug, email=user.email, phone=user.phone_number
+            )
+
+            if not license_status and user.role.name != "super_admin":
+                logger.warning("license for user not found or expired")
+                return Response(
+                    {
+                        "success": True,
+                        "info": f"OTP sent successfully to {field}, If user exists",
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            if "@" in field:
+                if not re.match(r"[^@]+@[^@]+\.[^@]+", field):
+                    return Response(
+                        {"success": False, "info": "Invalid Email or Phone Number"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                auth.send_otp(email=field)
+                print(f"OTP sent to email {field}")
+
+            elif re.match(r"^\+?\d{7,15}$", field):
+                auth.send_otp(phone=field)
+                print(f"OTP sent to phone number {field}")
+
+            else:
+                return Response(
+                    {"success": False, "info": "Invalid email or phone number format"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            return Response(
+                {
+                    "success": True,
+                    "info": f"OTP sent successfully to {field}, If user exists",
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.error(f"Error sending OTP: {e}")
+            return Response(
+                {"success": False, "info": "Failed to send OTP."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    login_without_password.throttle_scope = "login_without_password"
+
+    @action(
+        detail=False,
+        methods=["post"],
+        permission_classes=[permissions.AllowAny],
+        url_path="passwordless-login-verify-otp",
+    )
+    def verify_passwordless_otp(self, request, *args, **kwargs):
+        try:
+            data = request.data
+            field = data.get("field")
+            otp = data.get("otp")
+
+            if not field:
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Field is required.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if not otp:
+                return Response(
+                    {
+                        "success": False,
+                        "info": "OTP is required.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            user = User.objects.filter(Q(email=field) | Q(phone_number=field)).first()
+
+            if not user:
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Invalid Email or Phone Number",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            verify = auth.verify_otp(email=field, phone=field, user_entered_otp=otp)
+
+            if verify:
+                access_token = auth.generate_access_token(user)
+                refresh_token = auth.generate_refresh_token(user)
+
+                if user.password_changed:
+                    return Response(
+                        {
+                            "success": True,
+                            "info": "User logged in successfully",
+                            "password_changed": True,
+                            "access_token": access_token,
+                            "refresh_token": refresh_token,
+                            "role": user.role.name,
+                        },
+                        status=status.HTTP_200_OK,
+                    )
+
+                else:
+                    return Response(
+                        {
+                            "success": False,
+                            "info": "Kindly change password to continue",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+            else:
+                return Response(
+                    {
+                        "success": False,
+                        "info": "OTP verification failed. Please re-check your OTP and try again",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        except Exception as e:
+            logger.error(f"Error verifying OTP: {e}")
+            return Response(
+                {"success": False, "info": "Failed to verify OTP."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(
+        detail=False,
+        methods=["get"],
+        content_model=User,
+        permission_classes=[CustomPermission],
+        url_path="users-by-organization/(?P<uid>[^/.]+)",
+    )
+    def users_by_organization(self, request, uid=None, *args, **kwargs):
+        try:
+            if not uid:
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Organization UID is required.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            tenant = Tenant.objects.filter(org_slug=uid).first()
+
+            if not tenant:
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Organization does not exist.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            users = User.objects.filter(tenant=tenant)
+            serializer = UserListSerializer(users, many=True)
+            return Response(
+                {
+                    "success": True,
+                    "info": serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.error(f"Error fetching users by organization: {e}")
+            return Response(
+                {
+                    "success": False,
+                    "info": "Failed to fetch users by organization.",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="license-by-organization/(?P<uid>[^/.]+)",
+    )
+    def license_by_organization(self, request, uid=None, *args, **kwargs):
+        try:
+            if not uid:
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Organization UID is required.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            tenant = Tenant.objects.filter(org_slug=uid).first()
+
+            if not tenant:
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Organization does not exist.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            license = License.objects.filter(tenant=tenant).first()
+
+            if not license:
+                return Response(
+                    {
+                        "success": False,
+                        "info": "License does not exist.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            serializer = LicenseListSerializer(license, many=True)
+
+            return Response(
+                {
+                    "success": True,
+                    "info": serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.error(f"Error fetching license by organisation {str(e)}")
+            return Response(
+                {
+                    "success": False,
+                    "info": "Failed to fetch license by organisation.",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(
+        detail=False,
+        methods=["post"],
+        url_path="send-reset-password",
+    )
+    def send_reset_password(self, request, *args, **kwargs):
+        try:
+            data = request.data
+            field = data.get("field")
+
+            if not field:
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Field is required.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            user = User.objects.filter(Q(email=field) | Q(phone_number=field)).first()
+
+            if not user:
+                logger.warning(f"User with field {field} does not exist.")
+                return Response(
+                    {"success": True, "info": f"New password sent to {field}"},
+                    status=status.HTTP_200_OK,
+                )
+
+            new_password = "".join(
+                random.choices(string.ascii_letters + string.digits, k=12)
+            )
+            user.set_password(new_password)
+            user.password_expiry = arrow.now().shift(days=+3).datetime
+            user.login_enabled = False
+            user.save(update_fields=["password", "password_expiry", "login_enabled"])
+            auth.send_reset_password(field=field, password=new_password)
+
+            return Response(
+                {"success": True, "info": "Password reset successful."},
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.error(f"Error sending reset password: {e}")
+            return Response(
+                {
+                    "success": False,
+                    "info": "Failed to send reset password.",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    @action(
+        detail=False,
+        methods=["post"],
+        permission_classes=[permissions.AllowAny],
+        url_path="refresh-token",
+        throttle_classes=[ScopedRateThrottle],
+    )
+    def refresh_token(self, request):
+
+        refresh_token = request.data.get("refresh_token")
+
+        if not refresh_token:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Refresh token is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            payload = jwt.decode(
+                refresh_token,
+                config("SECRET_KEY"),
+                algorithms=["HS256"],
+            )
+
+            refresh_jti = payload.get("jti")
+
+            # Redis blacklist check
+            if cache.get(f"blacklist:refresh:{refresh_jti}"):
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Refresh token has been blacklisted. Please login again.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if payload.get("type") != "refresh":
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Invalid token type.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            token_obj = RefreshToken.objects.filter(
+                jti=refresh_jti, is_revoked=False
+            ).first()
+
+            if token_obj.is_expired():
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Refresh token has expired. Please login again.",
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            token_obj.last_used_at = arrow.utcnow().datetime
+            token_obj.save(update_fields=["last_used_at"])
+
+            access_token = auth.generate_access_token(token_obj.user)
+
+            return Response(
+                {
+                    "success": True,
+                    "info": "Token refreshed successfully.",
+                    "access_token": access_token,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except (
+            jwt.ExpiredSignatureError,
+            jwt.InvalidTokenError,
+            RefreshToken.DoesNotExist,
+        ) as e:
+            logger.error(f"Error refreshing token: {str(e)}")
+            return Response(
+                {"success": False, "info": "Invalid or expired refresh token"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+    refresh_token.throttle_scope = "refresh_token"
+
+    @action(detail=False, methods=["post"], url_path="logout")
+    def logout(self, request):
+        refresh_token = request.data.get("refresh_token")
+
+        if refresh_token:
+            try:
+                payload = jwt.decode(
+                    refresh_token,
+                    config("SECRET_KEY"),
+                    algorithms=["HS256"],
+                    options={"verify_exp": False},
+                )
+
+                refresh_jti = payload.get("jti")
+                exp = payload.get("exp")
+
+                if refresh_jti and exp:
+                    ttl = exp - int(arrow.utcnow().timestamp())
+
+                    if ttl > 0:
+                        cache.set(
+                            f"blacklist:refresh:{refresh_jti}",
+                        )
+
+                RefreshToken.objects.filter(jti=refresh_jti).update(is_revoked=True)
+
+            except jwt.InvalidTokenError:
+                print("Invalid refresh token")
+                pass
+
+        else:
+            print("Refresh token not provided")
+            return Response(
+                {
+                    "success": False,
+                    "info": " Refresh token is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # blacklist the access token in Redis
+        auth_header = request.headers.get("Authorization")
+
+        if auth_header:
+            try:
+                prefix, token = auth_header.split(" ")
+
+                if prefix.lower() != "bearer":
+                    return Response(
+                        {
+                            "success": False,
+                            "info": "Invalid token prefix.",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                payload = jwt.decode(
+                    token,
+                    config("SECRET_KEY"),
+                    algorithms=["HS256"],
+                    options={"verify_exp": False},
+                )
+
+                jti = payload.get("jti")
+                exp = payload.get("exp")
+
+                if jti and exp:
+                    ttl = exp - int(arrow.utcnow().timestamp())
+
+                    if ttl > 0:
+                        cache.set(f"blacklist:access:{jti}", timeout=ttl)
+
+            except Exception as e:
+                print(f"Error blacklisting access token: {str(e)}")
+                pass
+
+        return Response(
+            {
+                "success": True,
+                "info": "Logged out successfully.",
+            },
+            status=status.HTTP_200_OK,
+        )
