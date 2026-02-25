@@ -289,15 +289,13 @@ class JWTAuthentication(BaseAuthentication):
             raise AuthenticationFailed("Invalid token")
 
 
-
-
 class JWTAuthenticationScheme(OpenApiAuthenticationExtension):
-    target_class = 'apps.users.auth.JWTAuthentication'
-    name = 'JWTAuth'
+    target_class = "apps.users.auth.JWTAuthentication"
+    name = "JWTAuth"
 
     def get_security_definition(self, auto_schema):
         return {
-            'type': 'http',
-            'scheme': 'bearer',
-            'bearerFormat': 'JWT',
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT",
         }

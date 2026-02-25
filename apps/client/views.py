@@ -619,7 +619,6 @@ class FetchOrgLicense(viewsets.ReadOnlyModelViewSet):
     permission_classes = [CustomPermission]
     serializer_class = LicenseListSerializer
 
-
     def list(self, request, *args, **kwargs):
         try:
             if not request.user.role.name == "admin_user":
@@ -720,7 +719,6 @@ class LicenseHistoryViewset(viewsets.ViewSet):
     serializer_class = LicenseHistoryListSerializer
     lookup_field = "uid"
 
-
     def list(self, request, *args, **kwargs):
         try:
             history = LicenseHistory.objects.select_related("license").all()
@@ -741,8 +739,6 @@ class LicenseHistoryViewset(viewsets.ViewSet):
             )
 
 
-
-
 @extend_schema(
     summary="Fetch organization license plans",
     description="Get license plans and expiring licenses for the authenticated user's organization",
@@ -752,7 +748,7 @@ class LicenseHistoryViewset(viewsets.ViewSet):
             description="License plans and expiry data",
             examples=[
                 OpenApiExample(
-                    'Success Response',
+                    "Success Response",
                     value={
                         "success": True,
                         "info": {
@@ -760,7 +756,7 @@ class LicenseHistoryViewset(viewsets.ViewSet):
                                 {
                                     "type": "Premium",
                                     "expiry": "2026-12-31",
-                                    "seats": "5 / 10 Licensing"
+                                    "seats": "5 / 10 Licensing",
                                 }
                             ],
                             "expirys": [
@@ -768,15 +764,15 @@ class LicenseHistoryViewset(viewsets.ViewSet):
                                     "license": "Premium",
                                     "percentage": "75.50",
                                     "progressText": "226 of 300 days",
-                                    "remainingText": "74 days remaining until your plan requires update"
+                                    "remainingText": "74 days remaining until your plan requires update",
                                 }
-                            ]
-                        }
-                    }
+                            ],
+                        },
+                    },
                 )
-            ]
+            ],
         )
-    }
+    },
 )
 @api_view(["GET"])  # Fixed: should be uppercase
 @permission_classes([CustomPermission])
@@ -854,7 +850,7 @@ def fetch_org_license_plans(request, *args, **kwargs):
             description="Dashboard statistics",
             examples=[
                 OpenApiExample(
-                    'Success Response',
+                    "Success Response",
                     value={
                         "success": True,
                         "info": {
@@ -862,26 +858,26 @@ def fetch_org_license_plans(request, *args, **kwargs):
                                 "total": 50,
                                 "active": 45,
                                 "inactive": 5,
-                                "with_licenses": 48
+                                "with_licenses": 48,
                             },
                             "licenses": {
                                 "total": 100,
                                 "active": 85,
                                 "expired": 15,
-                                "types": 3
+                                "types": 3,
                             },
                             "users": {
                                 "total": 500,
                                 "active": 450,
                                 "inactive": 50,
-                                "admins": 10
-                            }
-                        }
-                    }
+                                "admins": 10,
+                            },
+                        },
+                    },
                 )
-            ]
+            ],
         )
-    }
+    },
 )
 @api_view(["GET"])
 @permission_classes([CustomPermission])
@@ -895,7 +891,9 @@ def fetch_dashboard_card(request, *args, **kwargs):
     """
 
     try:
-        tenants = Tenant.objects.prefetch_related("license_set").all()  # Fixed: removed comma
+        tenants = Tenant.objects.prefetch_related(
+            "license_set"
+        ).all()  # Fixed: removed comma
         licenses = License.objects.select_related("tenant").all()
 
         tenant_license_status = licenses.values("tenant", "status").annotate(
@@ -974,7 +972,7 @@ def fetch_dashboard_card(request, *args, **kwargs):
             description="Pie chart data with labels and datasets",
             examples=[
                 OpenApiExample(
-                    'Success Response',
+                    "Success Response",
                     value={
                         "success": True,
                         "info": {
@@ -982,16 +980,20 @@ def fetch_dashboard_card(request, *args, **kwargs):
                             "datasets": [
                                 {
                                     "data": [25, 45, 30],
-                                    "backgroundColor": ["#3B82F6", "#10B981", "#F59E0B"],
-                                    "borderWidth": 1
+                                    "backgroundColor": [
+                                        "#3B82F6",
+                                        "#10B981",
+                                        "#F59E0B",
+                                    ],
+                                    "borderWidth": 1,
                                 }
-                            ]
-                        }
-                    }
+                            ],
+                        },
+                    },
                 )
-            ]
+            ],
         )
-    }
+    },
 )
 @api_view(["GET"])
 @permission_classes([CustomPermission])
@@ -1001,7 +1003,9 @@ def fetch_dashboard_pie_charts(request, *args, **kwargs):
 
         license_counts = {lt_name: 0 for lt_name in all_license_types}
 
-        licenses_by_type = License.objects.values("license_type__name").annotate(  # Fixed: license_type not licenses_type
+        licenses_by_type = License.objects.values(
+            "license_type__name"
+        ).annotate(  # Fixed: license_type not licenses_type
             count=Count("id")
         )
 
@@ -1066,7 +1070,7 @@ def fetch_dashboard_pie_charts(request, *args, **kwargs):
             description="Bar chart data with labels and datasets",
             examples=[
                 OpenApiExample(
-                    'Success Response',
+                    "Success Response",
                     value={
                         "success": True,
                         "info": {
@@ -1077,16 +1081,16 @@ def fetch_dashboard_pie_charts(request, *args, **kwargs):
                                     "data": [10, 25, 15],
                                     "backgroundColor": "#3B82F6",
                                     "borderColor": "#3B82F6",
-                                    "borderWidth": 1
+                                    "borderWidth": 1,
                                 }
-                            ]
+                            ],
                         },
-                        "message": "Bar chart data fetched successfully"
-                    }
+                        "message": "Bar chart data fetched successfully",
+                    },
                 )
-            ]
+            ],
         )
-    }
+    },
 )
 @api_view(["GET"])
 @permission_classes([CustomPermission])

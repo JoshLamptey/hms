@@ -160,12 +160,7 @@ class LicenseHistoryListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = LicenseHistory
-        fields = [
-            "license",
-            "tenant",
-            "action",
-            "timestamp"
-        ]
+        fields = ["license", "tenant", "action", "timestamp"]
 
 
 class LicenseRenewalCreateUpdateSerializer(serializers.ModelSerializer):
