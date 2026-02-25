@@ -92,6 +92,7 @@ class User(AbstractUser):
         blank=True,
         null=True,
     )
+    image = models.ImageField(upload_to="users/", null=True, blank=True)
     password = models.CharField(max_length=128, blank=True, null=True)
     is_blocked = models.BooleanField(default=False)
     blocked_at = models.DateTimeField(blank=True, null=True)

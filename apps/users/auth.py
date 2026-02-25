@@ -6,6 +6,7 @@ import re
 import random
 from rest_framework.response import Response
 from rest_framework.authentication import BaseAuthentication
+from drf_spectacular.extensions import OpenApiAuthenticationExtension
 from rest_framework.exceptions import AuthenticationFailed, PermissionDenied
 from apps.client.models import RefreshToken
 from decouple import config
@@ -286,3 +287,17 @@ class JWTAuthentication(BaseAuthentication):
             raise AuthenticationFailed("Access token expired")
         except jwt.InvalidTokenError:
             raise AuthenticationFailed("Invalid token")
+
+
+
+
+class JWTAuthenticationScheme(OpenApiAuthenticationExtension):
+    target_class = 'apps.users.auth.JWTAuthentication'
+    name = 'JWTAuth'
+
+    def get_security_definition(self, auto_schema):
+        return {
+            'type': 'http',
+            'scheme': 'bearer',
+            'bearerFormat': 'JWT',
+        }

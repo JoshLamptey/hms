@@ -138,6 +138,7 @@ class LicenseListSerializer(serializers.ModelSerializer):
             "quantity",
             "status",
             "users",
+            "days_till_expiry",
             "created_at",
             "updated_at",
         ]
@@ -161,6 +162,9 @@ class LicenseHistoryListSerializer(serializers.ModelSerializer):
         model = LicenseHistory
         fields = [
             "license",
+            "tenant",
+            "action",
+            "timestamp"
         ]
 
 

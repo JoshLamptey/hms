@@ -31,7 +31,7 @@ def save_license_history(sender, instance, created, **kwargs):
 
 
 @receiver(post_delete, sender=License)
-def delele_license_history(sender, instance, **kwargs):
+def delete_license_history(sender, instance, **kwargs):
     """
     Signal to save License history when a License instance is deleted.
     """

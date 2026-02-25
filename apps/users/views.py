@@ -16,7 +16,6 @@ from apps.client.serializers import LicenseListSerializer
 from apps.users.auth import Authenticator
 from rest_framework import viewsets, status, permissions
 from rest_framework.response import Response
-from django.core.exceptions import ObjectDoesNotExist
 from apps.users.models import UserGroup, UserRole, User
 from apps.users.perms import CustomPermission
 from apps.users.serializers import (
@@ -34,6 +33,8 @@ from rest_framework.throttling import (
 )
 from rest_framework.exceptions import PermissionDenied
 from apps.users.utils import send_login_credentials
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
+from drf_spectacular.types import OpenApiTypes
 from decouple import config
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.hashers import check_password, make_password
@@ -118,8 +119,6 @@ class UserRoleViewset(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
-
-
 EXCLUDED_APPS = [
     "admin",
     "auth",
@@ -137,7 +136,6 @@ CLIENT_EXCLUDED_APPS = [
     "client",
 ]
 
-
 ALL_EXCLUDED_APPS = EXCLUDED_APPS + CLIENT_EXCLUDED_APPS
 
 
@@ -146,6 +144,45 @@ class PermissionViewset(viewsets.ViewSet):
     ViewSet to list all available permissions in the system.
     """
 
+    @extend_schema(
+        summary="List all permissions",
+        description="Returns all available permissions in the system grouped by model name",
+        responses={
+            200: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="Permissions grouped by model",
+                examples=[
+                    OpenApiExample(
+                        'Success Response',
+                        value={
+                            "success": True,
+                            "info": {
+                                "user": [
+                                    {
+                                        "id": 1,
+                                        "name": "Can add user",
+                                        "codename": "add_user"
+                                    },
+                                    {
+                                        "id": 2,
+                                        "name": "Can change user",
+                                        "codename": "change_user"
+                                    }
+                                ],
+                                "license": [
+                                    {
+                                        "id": 10,
+                                        "name": "Can view license",
+                                        "codename": "view_license"
+                                    }
+                                ]
+                            }
+                        }
+                    )
+                ]
+            )
+        }
+    )
     def list(self, request, *args, **kwargs):
         permissions = Permission.objects.select_related("content_type")
         grouped_permissions = {}
@@ -176,14 +213,15 @@ class PermissionViewset(viewsets.ViewSet):
                 }
             )
 
-            return Response(
-                {
-                    "success": True,
-                    "info": grouped_permissions,
-                },
-                status=status.HTTP_200_OK,
-            )
-
+        return Response(
+            {
+                "success": True,
+                "info": grouped_permissions,
+            },
+            status=status.HTTP_200_OK,
+        )
+        
+        
     # I don't understand this yet i will touch it tomorrow
     # @action(detail=False, methods=["get"], url_path="fetch-organization-permissions")
     # def fetch_organization_permissions(self, request):
@@ -461,7 +499,7 @@ class UserViewset(viewsets.ModelViewSet):
     lookup_field = "uid"
     throttle_classes = [ScopedRateThrottle, UserRateThrottle]
 
-    def get_serializer(self):
+    def get_serializer_class(self):
         if self.action == "create":
             return UserCreateSerializer
 
@@ -638,6 +676,8 @@ class UserViewset(viewsets.ModelViewSet):
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+        
+        # send_login_credentials(field,password=data.get("password"))
 
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
@@ -1618,3 +1658,149 @@ class UserViewset(viewsets.ModelViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+class FetchOrgUsers(viewsets.ModelViewSet):
+    content_model = User
+    permission_classes = [CustomPermission]
+    serializer_class = UserListSerializer
+    
+    def get_queryset(self):
+        return User.objects.filter(org_slug=self.request.user.org_slug).order_by("id")
+    
+    def list(self, request, *args, **kwargs):
+        try:
+            users = User.objects.filter(org_slug=self.request.user.org_slug).order_by("id")
+            
+            serializer = self.get_serializer(users, many=True)
+            
+            return Response({
+                "success": True,
+                "info": serializer.data,
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error fetching org users: {str(e)}", exc_info=True)
+            
+            return Response({
+                "success": False,
+                "info": "Failed to fetch organisation users.",
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            
+
+
+class FetchOrgUserGroups(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint to fetch all user groups belonging to the requesting user's organization
+    """
+    
+    content_model= UserGroup
+    permission_classes = [CustomPermission]
+    serializer_class = UserGroupListSerializer
+    
+    
+    def list(self, request, *args, **kwargs):
+        try:
+            user_groups = (
+                UserGroup.objects.filter(tenant=request.user.tenant).all()
+                .order_by("-created_at")
+            )
+            
+            serializer = self.serializer_class(user_groups, many=True)
+            
+            return Response({
+                "success": True,
+                "info": serializer.data,
+            }, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error fetching org user groups: {str(e)}")
+            return Response({
+                "success": False,
+                "info": "Failed to fetch organisation user groups.",
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+
+
+class SystemLogsViewset(viewsets.ViewSet):
+    """
+    Endpoints for system-level utilities like log downloads.
+    """
+    
+    @extend_schema(
+        summary="Download debug log file",
+        description="Downloads the debug.log file. Only accessible by super admins.",
+        responses={
+            200: OpenApiResponse(
+                description="Debug log file",
+                # This indicates a file download response
+            ),
+            403: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="Forbidden - Not a super admin",
+                examples=[
+                    OpenApiExample(
+                        'Forbidden Response',
+                        value={
+                            "success": False,
+                            "info": "Hate to be that way, but you ain't allowed here big dawg!!"
+                        }
+                    )
+                ]
+            ),
+            404: OpenApiResponse(
+                description="Debug log file not found"
+            ),
+            500: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="Server error",
+                examples=[
+                    OpenApiExample(
+                        'Error Response',
+                        value={
+                            "success": False,
+                            "info": "Failed to download debug log."
+                        }
+                    )
+                ]
+            )
+        }
+    )
+    @action(detail=False, methods=["get"], url_path="download-debug-log")
+    def download_debug_log(self, request):
+        try:
+            if request.user.role.name != "super_admin":
+                return Response({
+                    "success": False,
+                    "info": "Hate to be that way, but you ain't allowed here big dawg!!",
+                }, status=status.HTTP_403_FORBIDDEN)
+                
+            if not request.user.is_superuser:
+                return Response({
+                    "success": False,
+                    "info": "Are you supposed to be here?!, Exactly! Exit is that way chale!",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        
+            base_dir = settings.BASE_DIR
+            log_path = os.path.join(base_dir, "debug.log")
+            
+            if not os.path.exists(log_path):
+                raise Http404("debug.log file not found")
+            
+            response = FileResponse(
+                open(log_path, "rb"),
+                as_attachment=True,
+                filename="debug.log",
+                content_type="text/plain",
+            )
+            
+            return response
+        
+        except Exception as e:
+            logger.error(f"Error downloading debug log: {str(e)}")
+            return Response({
+                "success": False,
+                "info": "Failed to download debug log.",
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)

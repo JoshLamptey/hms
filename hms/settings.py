@@ -42,7 +42,7 @@ INSTALLED_APPS = [
     "rest_framework",
     "drf_spectacular",
     "post_office",
-    "csp",
+    # "csp",
     "django_extensions",
     "django_celery_results",
     "django_celery_beat",
@@ -53,14 +53,14 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
-    "csp.middleware.CSPMiddleware",
+    # "csp.middleware.CSPMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "church.middleware.PermissionsPolicyMiddleware",
+    "hms.middleware.PermissionsPolicyMiddleware",
 ]
 
 ROOT_URLCONF = "hms.urls"

@@ -1,5 +1,7 @@
-import json
 import arrow
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
+from drf_spectacular.types import OpenApiTypes
+from rest_framework.decorators import api_view, permission_classes
 from rest_framework.decorators import action, permission_classes, api_view
 from rest_framework import viewsets, status
 from rest_framework.response import Response
@@ -615,6 +617,8 @@ class LicenseViewset(viewsets.ModelViewSet):
 class FetchOrgLicense(viewsets.ReadOnlyModelViewSet):
     content_model = License
     permission_classes = [CustomPermission]
+    serializer_class = LicenseListSerializer
+
 
     def list(self, request, *args, **kwargs):
         try:
@@ -628,7 +632,7 @@ class FetchOrgLicense(viewsets.ReadOnlyModelViewSet):
                 "-expiry_date"
             )
 
-            serializer = LicenseListSerializer(licenses, many=True)
+            serializer = self.get_serializer_class(licenses, many=True)
 
             return Response(
                 {"success": True, "info": serializer.data}, status=status.HTTP_200_OK
@@ -662,7 +666,7 @@ class LicenseRenewalViewset(viewsets.ModelViewSet):
     def get_serializer_class(self):
         if self.action in ["create", "update", "partial_update"]:
             return LicenseRenewalCreateUpdateSerializer
-        LicenseRenewalListSerializer
+        return LicenseRenewalListSerializer
 
     def create(self, request, *args, **kwargs):
         try:
@@ -713,11 +717,14 @@ class LicenseRenewalViewset(viewsets.ModelViewSet):
 
 class LicenseHistoryViewset(viewsets.ViewSet):
     permission_classes = [CustomPermission]
+    serializer_class = LicenseHistoryListSerializer
+    lookup_field = "uid"
+
 
     def list(self, request, *args, **kwargs):
         try:
             history = LicenseHistory.objects.select_related("license").all()
-            serializer = LicenseHistoryListSerializer(history, many=True)
+            serializer = self.serializer_class(history, many=True)
 
             return Response(
                 {"success": True, "info": serializer.data}, status=status.HTTP_200_OK
@@ -734,9 +741,44 @@ class LicenseHistoryViewset(viewsets.ViewSet):
             )
 
 
-api_view(["get"])
 
 
+@extend_schema(
+    summary="Fetch organization license plans",
+    description="Get license plans and expiring licenses for the authenticated user's organization",
+    responses={
+        200: OpenApiResponse(
+            response=OpenApiTypes.OBJECT,
+            description="License plans and expiry data",
+            examples=[
+                OpenApiExample(
+                    'Success Response',
+                    value={
+                        "success": True,
+                        "info": {
+                            "plans": [
+                                {
+                                    "type": "Premium",
+                                    "expiry": "2026-12-31",
+                                    "seats": "5 / 10 Licensing"
+                                }
+                            ],
+                            "expirys": [
+                                {
+                                    "license": "Premium",
+                                    "percentage": "75.50",
+                                    "progressText": "226 of 300 days",
+                                    "remainingText": "74 days remaining until your plan requires update"
+                                }
+                            ]
+                        }
+                    }
+                )
+            ]
+        )
+    }
+)
+@api_view(["GET"])  # Fixed: should be uppercase
 @permission_classes([CustomPermission])
 def fetch_org_license_plans(request, *args, **kwargs):
     try:
@@ -746,7 +788,7 @@ def fetch_org_license_plans(request, *args, **kwargs):
 
         if not request.user.role.name == "super_admin":
             return Response(
-                {"success": False, "info": "Unathorized Request"},
+                {"success": False, "info": "Unauthorized Request"},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
@@ -761,9 +803,7 @@ def fetch_org_license_plans(request, *args, **kwargs):
             )
 
         next_90_days = arrow.now().shift(days=90).date()
-
         expirys = plans.filter(expiry_date__lte=next_90_days)
-
         expiry_data = []
 
         for exp in expirys:
@@ -788,10 +828,11 @@ def fetch_org_license_plans(request, *args, **kwargs):
                 }
             )
 
-            return Response(
-                {"success": True, "info": {"plans": plan_data, "expirys": expiry_data}},
-                status=status.HTTP_200_OK,
-            )
+        # CRITICAL BUG FIX: Move return statement outside the loop
+        return Response(
+            {"success": True, "info": {"plans": plan_data, "expirys": expiry_data}},
+            status=status.HTTP_200_OK,
+        )
 
     except Exception as e:
         print(e)
@@ -804,7 +845,45 @@ def fetch_org_license_plans(request, *args, **kwargs):
         )
 
 
-@api_view(["get"])
+@extend_schema(
+    summary="Fetch dashboard card statistics",
+    description="Get dashboard statistics including organizations, licenses, and users",
+    responses={
+        200: OpenApiResponse(
+            response=OpenApiTypes.OBJECT,
+            description="Dashboard statistics",
+            examples=[
+                OpenApiExample(
+                    'Success Response',
+                    value={
+                        "success": True,
+                        "info": {
+                            "tenants": {
+                                "total": 50,
+                                "active": 45,
+                                "inactive": 5,
+                                "with_licenses": 48
+                            },
+                            "licenses": {
+                                "total": 100,
+                                "active": 85,
+                                "expired": 15,
+                                "types": 3
+                            },
+                            "users": {
+                                "total": 500,
+                                "active": 450,
+                                "inactive": 50,
+                                "admins": 10
+                            }
+                        }
+                    }
+                )
+            ]
+        )
+    }
+)
+@api_view(["GET"])
 @permission_classes([CustomPermission])
 def fetch_dashboard_card(request, *args, **kwargs):
     """
@@ -816,7 +895,7 @@ def fetch_dashboard_card(request, *args, **kwargs):
     """
 
     try:
-        tenants = Tenant.objects.prefetch_related("license_set"), all()
+        tenants = Tenant.objects.prefetch_related("license_set").all()  # Fixed: removed comma
         licenses = License.objects.select_related("tenant").all()
 
         tenant_license_status = licenses.values("tenant", "status").annotate(
@@ -886,6 +965,34 @@ def fetch_dashboard_card(request, *args, **kwargs):
         )
 
 
+@extend_schema(
+    summary="Fetch dashboard pie chart data",
+    description="Get license distribution data for pie chart visualization",
+    responses={
+        200: OpenApiResponse(
+            response=OpenApiTypes.OBJECT,
+            description="Pie chart data with labels and datasets",
+            examples=[
+                OpenApiExample(
+                    'Success Response',
+                    value={
+                        "success": True,
+                        "info": {
+                            "labels": ["Basic", "Premium", "Enterprise"],
+                            "datasets": [
+                                {
+                                    "data": [25, 45, 30],
+                                    "backgroundColor": ["#3B82F6", "#10B981", "#F59E0B"],
+                                    "borderWidth": 1
+                                }
+                            ]
+                        }
+                    }
+                )
+            ]
+        )
+    }
+)
 @api_view(["GET"])
 @permission_classes([CustomPermission])
 def fetch_dashboard_pie_charts(request, *args, **kwargs):
@@ -894,17 +1001,17 @@ def fetch_dashboard_pie_charts(request, *args, **kwargs):
 
         license_counts = {lt_name: 0 for lt_name in all_license_types}
 
-        licenses_by_type = License.objects.values("licenses_type__name").annotate(
+        licenses_by_type = License.objects.values("license_type__name").annotate(  # Fixed: license_type not licenses_type
             count=Count("id")
         )
 
         for item in licenses_by_type:
-            lt_name = item["license_by_type"]
+            lt_name = item["license_type__name"]  # Fixed: match the field name above
             if lt_name in license_counts:
                 license_counts[lt_name] = item["count"]
 
         labels = list(license_counts.keys())
-        counts = list(license_counts.values)
+        counts = list(license_counts.values())  # Fixed: added parentheses
 
         background_colors = [
             "#3B82F6",  # Blue
@@ -950,6 +1057,37 @@ def fetch_dashboard_pie_charts(request, *args, **kwargs):
         )
 
 
+@extend_schema(
+    summary="Fetch dashboard bar chart data",
+    description="Get recent license renewals data for bar chart visualization",
+    responses={
+        200: OpenApiResponse(
+            response=OpenApiTypes.OBJECT,
+            description="Bar chart data with labels and datasets",
+            examples=[
+                OpenApiExample(
+                    'Success Response',
+                    value={
+                        "success": True,
+                        "info": {
+                            "labels": ["org-1", "org-2", "org-3"],
+                            "datasets": [
+                                {
+                                    "label": "License Quantity",
+                                    "data": [10, 25, 15],
+                                    "backgroundColor": "#3B82F6",
+                                    "borderColor": "#3B82F6",
+                                    "borderWidth": 1
+                                }
+                            ]
+                        },
+                        "message": "Bar chart data fetched successfully"
+                    }
+                )
+            ]
+        )
+    }
+)
 @api_view(["GET"])
 @permission_classes([CustomPermission])
 def fetch_dashboard_bar_chart(request, *args, **kwargs):
