@@ -62,7 +62,27 @@ class Authenticator:
             expires_at=arrow.utcnow().shift(days=+7).datetime,
         )
         return token
-
+    
+    def generate_reset_token(self, user):
+        
+        payload = {
+            "user_id": user.id,
+            "user_uid": str(user.uid),
+            "phone_number": str(user.phone_number),
+            "type": "password_reset",
+            "iat": arrow.utcnow().datetime,
+            "exp": arrow.utcnow().shift(minutes=10).datetime,
+        }
+        token = jwt.encode(payload, config("SECRET_KEY"), algorithm="HS256")
+        
+        # ensure token is a string before caching
+        if isinstance(token, bytes):
+            token = token.decode("utf-8")
+        
+        cache.set(f"reset_token:{user.phone_number}", token, timeout=600)
+        return token
+    
+    
     def generate_otp(self):
         rand = random.randint(100000, 999999)
         return rand

@@ -694,7 +694,6 @@ class UserViewset(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["post"], url_path="update-password")
     def update_password(self, request, pk=None):
-        print(request.data)
         data = request.data
         field = data.get("field")
         password = data.get("password")
@@ -770,6 +769,128 @@ class UserViewset(viewsets.ModelViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+    @action(
+        detail=False,
+        methods=["post"],
+        permission_classes=[permissions.AllowAny],
+        url_path="reset-password",
+        throttle_classes=[ScopedRateThrottle],
+    )
+    def reset_password(self, request, pk=None):
+        data = request.data
+        field = data.get("field")
+        reset_token = data.get("reset_token")
+        password = data.get("password")
+        confirm_password = data.get("confirm_password")
+
+        if not field:
+            return Response(
+                {"success": False, "info": "field is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not reset_token:
+            return Response(
+                {"success": False, "info": "reset_token is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # decode the reset token
+        try:
+            payload = jwt.decode(reset_token, config("SECRET_KEY"), algorithms=["HS256"])
+        except jwt.ExpiredSignatureError:
+            return Response(
+                {"success": False, "info": "Reset token has expired"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        except jwt.InvalidTokenError:
+            return Response(
+                {"success": False, "info": "Invalid reset token"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        # ensure token is scoped correctly
+        if payload.get("type") != "password_reset":
+            return Response(
+                {"success": False, "info": "Invalid token type"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        phone_number = payload.get("phone_number")
+
+        # verify token exists in redis and matches
+        cached_token = cache.get(f"reset_token:{phone_number}")
+        
+        if isinstance(cached_token, bytes):
+            cached_token = cached_token.decode("utf-8")
+
+        if not cached_token or cached_token != reset_token:
+            return Response(
+                {"success": False, "info": "Reset token is invalid or already used"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        # get user from phone in token
+        try:
+            user = User.objects.get(phone_number=phone_number)
+        except User.DoesNotExist:
+            return Response(
+                {"success": False, "info": "User not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # match the field sent by frontend against the token's phone number
+        if field != str(user.phone_number or user.email):
+            return Response(
+                {"success": False, "info": "field does not match the reset token"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if not password:
+            return Response(
+                {"success": False, "info": "password is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not confirm_password:
+            return Response(
+                {"success": False, "info": "confirm_password is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if password != confirm_password:
+            return Response(
+                {"success": False, "info": "passwords do not match"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            validate_password(password, user=user)
+        except ValidationError as e:
+            return Response(
+                {"success": False, "info": e.messages},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        hashed_password = make_password(password)
+        user.set_password(hashed_password)
+        user.password_changed = True
+        user.login_enabled = True
+        user.save(update_fields=["password", "password_changed", "login_enabled"])
+
+        # invalidate token immediately — one time use
+        cache.delete(f"reset_token:{phone_number}")
+
+        RefreshToken.objects.filter(user=user).update(is_revoked=True)
+
+        return Response(
+            {"success": True, "info": "password updated successfully"},
+            status=status.HTTP_202_ACCEPTED,)
+        
+    reset_password.throttle_scope = "reset_password"
+    
+
+
 
     @action(
         detail=False,
@@ -875,10 +996,14 @@ class UserViewset(viewsets.ModelViewSet):
             verify = auth.verify_otp(phone=field, user_entered_otp=otp)
 
         if verify:
+            user = User.objects.filter(Q(email=field) | Q(phone_number=field)).first()
+            temp_token = auth.generate_reset_token(user)
+            print(f"temp token generated {temp_token}")
             return Response(
                 {
                     "success": True,
                     "info": "OTP verified successfully.",
+                    "temp_token": temp_token,
                 },
                 status=status.HTTP_200_OK,
             )

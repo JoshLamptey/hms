@@ -127,20 +127,21 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
 
 
-    # uncomment after setting up rate
-    # "DEFAULT_THROTTLE_CLASSES": [
-    #     "rest_framework.throttling.UserRateThrottle",
-    #     "rest_framework.throttling.ScopedRateThrottle",
-    # ],
-    # "DEFAULT_THROTTLE_RATES": {
-    #     "user": "100/min",
+    
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.ScopedRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "user": "100/min",
 
-    #     # Auth endpoints
-    #     "login": "3/min",
-    #     "passwordless_login": "3/min",
-    #     "forgot_password": "3/min",
-    #     "refresh_token": "2/min",
-    # },
+        # Auth endpoints
+        "login": "3/min",
+        "passwordless_login": "3/min",
+        "forgot_password": "3/min",
+        "refresh_token": "2/min",
+        "reset_password": "3/min",
+    },
 }
 
 

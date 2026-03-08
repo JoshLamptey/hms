@@ -18,7 +18,7 @@ Key features:
 
 ## File Structure
 
-```
+```txt
 apps/users/
 ├── __init__.py          # Package initialization
 ├── admin.py             # Django admin configuration
@@ -50,7 +50,7 @@ Represents a group of users with assigned permissions, enabling role-based acces
 **Fields:**
 
 | Field | Type | Description |
-|-------|------|-------------|
+| :------- | :------ | :------------- |
 | `uid` | UUIDField | Unique identifier, auto-generated |
 | `users` | ManyToManyField | Related users |
 | `permissions` | ManyToManyField | Django permissions |
@@ -75,7 +75,7 @@ Defines user roles in the system with predefined role types.
 **Role Choices:**
 
 | Value | Display Name | Description |
-|-------|--------------|-------------|
+| :------- | -------------- | :------------- |
 | `SUPER_ADMIN` | Super Admin | Full system access |
 | `STAFF` | Staff | Staff-level access |
 | `CUSTOMER` | Customer | Customer-level access |
@@ -83,7 +83,7 @@ Defines user roles in the system with predefined role types.
 **Fields:**
 
 | Field | Type | Description |
-|-------|------|-------------|
+| :------- | ------|-------------|
 | `uid` | UUIDField | Unique identifier |
 | `name` | CharField | Role name from choices |
 | `created_at` | DateTimeField | Creation timestamp |

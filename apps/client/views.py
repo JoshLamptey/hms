@@ -26,6 +26,7 @@ from apps.client.serializers import (
     LicenseRenewalCreateUpdateSerializer,
     LicenseRenewalListSerializer,
 )
+from django.db import transaction
 from apps.client.decorators import with_schema
 
 User = get_user_model()
@@ -98,6 +99,16 @@ class TenantViewset(viewsets.ModelViewSet):
                     )
 
             tenant_name = data.get("name")
+            phone_number = data.get("phone_number")
+            email = data.get("email")
+            
+            tenant_contact = Tenant.objects.filter(Q(email=email) | Q(phone_number=phone_number))
+
+            if tenant_contact.exists():
+                return Response({
+                    "success" : False,
+                    "info" : "An organisation with your contact details already exist"
+                })
 
             tenant = Tenant.objects.filter(name=tenant_name)
 
@@ -110,7 +121,6 @@ class TenantViewset(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            phone_number = data.get("phone_number")
 
             if phone_number:
                 phone = parse(phone_number)
@@ -120,10 +130,12 @@ class TenantViewset(viewsets.ModelViewSet):
                         {"success": False, "info": "Invalid phone number"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-
-            serializer = self.get_serializer(data=data)
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
+            
+            with transaction.atomic():
+    
+                serializer = self.get_serializer(data=data)
+                serializer.is_valid(raise_exception=True)
+                serializer.save()
 
             return Response(
                 {"success": True, "info": "Organization created successfully"},
