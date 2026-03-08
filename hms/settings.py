@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     "django_celery_beat",
     "apps.users",
     "apps.client",
+    "apps.notifications"
 ]
 
 MIDDLEWARE = [
