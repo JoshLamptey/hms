@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 
 from pathlib import Path
 from decouple import config
+from celery.schedules import crontab
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -287,4 +288,13 @@ PERMISSIONS_POLICY = {
     "payment": [],
     "usb": [],
     "fullscreen": ["self"],
+}
+
+
+CELERY_BEAT_SCHEDULE = {
+    # Retry failed SMS/email notifications every hour
+    "retry-failed-notifications": {
+        "task": "apps.notifications.tasks.retry_failed_notifications",
+        "schedule": crontab(minute=0),  # top of every hour
+    },
 }

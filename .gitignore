@@ -2,7 +2,6 @@
 env/
 static/
 media/
-migrations/
 __pycache__/
 debug.log
 venv

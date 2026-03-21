@@ -4,11 +4,13 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.utils.translation import gettext_lazy as t
 from django.contrib.auth.hashers import make_password
-from apps.users.utils import send_login_credentials
+from apps.notifications.service import NotificationService
 from phonenumber_field.modelfields import PhoneNumberField
 from django.contrib.auth.models import Permission
 from decouple import config
 from django.utils import timezone
+
+service = NotificationService()
 
 
 class UserGroup(models.Model):
@@ -112,8 +114,8 @@ class User(AbstractUser):
         self.password = make_password(temp_password)
         self.password_changed = False
         self.password_expiry = arrow.now().shift(days=+7).datetime
-        self.save()
-        send_login_credentials(self.email, temp_password)
+        full_name = self.get_full_name()
+        service.send_login_credentials(to=self.email,password=temp_password, full_name=full_name)
         return temp_password
 
     def save(self, *args, **kwargs):

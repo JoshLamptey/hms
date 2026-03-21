@@ -32,17 +32,17 @@ from rest_framework.throttling import (
     UserRateThrottle,
 )
 from rest_framework.exceptions import PermissionDenied
-from apps.users.utils import send_login_credentials
+from apps.notifications.service import NotificationService
 from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
 from drf_spectacular.types import OpenApiTypes
 from decouple import config
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.hashers import check_password, make_password
 from django.core.exceptions import ValidationError
-from django.contrib.auth import get_user_model
 
 auth = Authenticator()
 logger = logging.getLogger(__name__)
+service = NotificationService()
 
 
 class UserRoleViewset(viewsets.ModelViewSet):
@@ -193,7 +193,7 @@ class PermissionViewset(viewsets.ViewSet):
         is_super_admin = (
             user.is_authenticated
             and getattr(user, "role", None)
-            and user.role.name == "super_admin"
+            and user.role.name == "SUPER_ADMIN"
         )
 
         for perm in permissions:
@@ -274,14 +274,14 @@ class UserGroupViewset(viewsets.ModelViewSet):
         user = self.request.user
         qs = self.queryset
 
-        if user.role == UserRole.Role.SUPER_ADMIN:
+        if user.role and user.role.name == UserRole.Role.SUPER_ADMIN:
             return qs.filter(is_global=True)
 
         return qs.filter(
             is_global=False,
-            tenant__org_slug=user.org_slug,
+            tenant=user.tenant, 
         )
-
+        
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
         serializer = self.get_serializer(queryset, many=True)
@@ -517,7 +517,7 @@ class UserViewset(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
 
-        if user.role.name == "super_admin":
+        if user.role.name == "SUPER_ADMIN":
             return self.queryset
 
         return self.queryset.filter(tenant__org_slug=user.org_slug)
@@ -534,7 +534,7 @@ class UserViewset(viewsets.ModelViewSet):
 
         user = self.request.user
 
-        if user.role.name in ["admin_user", "super_admin"]:
+        if user.role.name in ["ADMIN_USER", "SUPER_ADMIN"]:
             return obj
 
         if obj.id != user.id:
@@ -602,7 +602,7 @@ class UserViewset(viewsets.ModelViewSet):
         )
 
     def list(self, request, *args, **kwargs):
-        if request.user.role.name not in ["super_admin"]:
+        if request.user.role.name not in ["SUPER_ADMIN"]:
             raise PermissionDenied("You do not have permission to view this list.")
 
         queryset = self.filter_queryset(self.get_queryset())
@@ -677,12 +677,17 @@ class UserViewset(viewsets.ModelViewSet):
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-
-        # send_login_credentials(field,password=data.get("password"))
+        email=data.get("email")
+        full_name = f"{data.get('first_name')} {data.get('last_name')}"
+        
+        service.send_login_credentials(
+            to = email,
+            full_name=full_name,
+            password=data.get("password")
+        )
 
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
 
         return Response(
             {
@@ -920,7 +925,7 @@ class UserViewset(viewsets.ModelViewSet):
                 {"success": True, "info": f"OTP sent successfully to {field}"},
                 status=status.HTTP_200_OK,
             )
-
+        full_name = user.get_full_name() 
         try:
             if "@" in field:
                 if not re.match(r"[^@]+@[^@]+\.[^@]+", field):
@@ -930,10 +935,12 @@ class UserViewset(viewsets.ModelViewSet):
                             "info": "Invalid email format.",
                         }
                     )
-                auth.send_otp(email=field)
+                
+                auth.send_otp(email=field, full_name=full_name)
 
             elif re.match(r"^\+?\d{7,15}$", field):
-                auth.send_otp(phone=field)
+                auth.send_otp(phone=field, full_name=full_name)
+                
 
             else:
                 return Response(
@@ -1056,8 +1063,8 @@ class UserViewset(viewsets.ModelViewSet):
 
                 if not valid_license.users.filter(pk=user.pk).exists():
                     logger.warning(f"{user} failed license check")
-                    # valid_license.users.add(user)
-                    # logger.info(f"User {user} added to license users")
+                    valid_license.users.add(user)
+                    logger.info(f"User {user} added to license users")
                     return False
 
                 logger.info(f"{user} passed license check")
@@ -1110,7 +1117,7 @@ class UserViewset(viewsets.ModelViewSet):
 
         now = arrow.now().datetime
 
-        if not user.role.name == "super_admin":
+        if not user.role.name == "SUPER_ADMIN":
             if not user.password_changed and user.password_expiry <= now:
                 logger.warning(
                     f"Blocked: expired password for {user.email}, expiry={user.password_expiry}, now={now}"
@@ -1137,7 +1144,7 @@ class UserViewset(viewsets.ModelViewSet):
                 user.org_slug, email=user.email, phone=user.phone_number
             )
 
-            if not license_status and user.role.name != "super_admin":
+            if not license_status and user.role.name != "SUPER_ADMIN":
                 return Response(
                     {"success": False, "info": "Your organisation license is expired"},
                     status=status.HTTP_401_UNAUTHORIZED,
@@ -1313,21 +1320,21 @@ class UserViewset(viewsets.ModelViewSet):
                 return Response(
                     {
                         "success": True,
-                        "info": f"OTP sent successfully to {field}, If user exists",
+                        "info": f"OTP sent successfully to {field}",
                     },
                     status=status.HTTP_200_OK,
                 )
-
+            full_name = user.get_full_name() 
             license_status = self.check_user_license_status(
                 user.org_slug, email=user.email, phone=user.phone_number
             )
 
-            if not license_status and user.role.name != "super_admin":
+            if not license_status and user.role.name != "SUPER_ADMIN":
                 logger.warning("license for user not found or expired")
                 return Response(
                     {
                         "success": True,
-                        "info": f"OTP sent successfully to {field}, If user exists",
+                        "info": f"OTP sent successfully to {field}",
                     },
                     status=status.HTTP_200_OK,
                 )
@@ -1338,12 +1345,11 @@ class UserViewset(viewsets.ModelViewSet):
                         {"success": False, "info": "Invalid Email or Phone Number"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-
-                auth.send_otp(email=field)
+                auth.send_otp(email=field, full_name=full_name)
                 print(f"OTP sent to email {field}")
 
             elif re.match(r"^\+?\d{7,15}$", field):
-                auth.send_otp(phone=field)
+                auth.send_otp(phone=field, full_name=full_name)
                 print(f"OTP sent to phone number {field}")
 
             else:
@@ -1581,6 +1587,7 @@ class UserViewset(viewsets.ModelViewSet):
                 )
 
             user = User.objects.filter(Q(email=field) | Q(phone_number=field)).first()
+            
 
             if not user:
                 logger.warning(f"User with field {field} does not exist.")
@@ -1592,11 +1599,12 @@ class UserViewset(viewsets.ModelViewSet):
             new_password = "".join(
                 random.choices(string.ascii_letters + string.digits, k=12)
             )
+            full_name = user.get_full_name() 
             user.set_password(new_password)
             user.password_expiry = arrow.now().shift(days=+3).datetime
             user.login_enabled = False
             user.save(update_fields=["password", "password_expiry", "login_enabled"])
-            auth.send_reset_password(field=field, password=new_password)
+            auth.send_reset_password(field=field, password=new_password, full_name=full_name)
 
             return Response(
                 {"success": True, "info": "Password reset successful."},
@@ -1723,6 +1731,8 @@ class UserViewset(viewsets.ModelViewSet):
                     if ttl > 0:
                         cache.set(
                             f"blacklist:refresh:{refresh_jti}",
+                            "blacklisted",  # ← value
+                            timeout=ttl,    # ← timeout
                         )
 
                 RefreshToken.objects.filter(jti=refresh_jti).update(is_revoked=True)
@@ -1771,8 +1781,7 @@ class UserViewset(viewsets.ModelViewSet):
                     ttl = exp - int(arrow.utcnow().timestamp())
 
                     if ttl > 0:
-                        cache.set(f"blacklist:access:{jti}", timeout=ttl)
-
+                        cache.set(f"blacklist:access:{jti}", "blacklisted", timeout=ttl)
             except Exception as e:
                 print(f"Error blacklisting access token: {str(e)}")
                 pass
@@ -1905,7 +1914,7 @@ class SystemLogsViewset(viewsets.ViewSet):
     @action(detail=False, methods=["get"], url_path="download-debug-log")
     def download_debug_log(self, request):
         try:
-            if request.user.role.name != "super_admin":
+            if request.user.role.name != "SUPER_ADMIN":
                 return Response(
                     {
                         "success": False,

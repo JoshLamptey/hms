@@ -87,7 +87,7 @@ class CustomPermission(BasePermission):
 
         if not License.objects.filter(
             users=request.user,
-            status=License.Status.ACTIVE,
+            status=License.LicenseStatus.ACTIVE,
             expiry_date__gt=timezone.now(),
         ).exists():
             raise PermissionDenied(

@@ -12,8 +12,10 @@ from apps.client.models import RefreshToken
 from decouple import config
 from django.core.cache import cache
 from apps.users.utils import send_notification
+from apps.notifications.service import NotificationService
 
-# from apps.notifications.notify import Notify
+service = NotificationService()
+
 from django.contrib.auth import get_user_model
 
 logger = logging.getLogger(__name__)
@@ -37,7 +39,7 @@ class Authenticator:
             "exp": arrow.utcnow().shift(minutes=+15).datetime,
         }
 
-        token = jwt.encode(payload, config("JWT_SECRET_KEY"), algorithm="HS256")
+        token = jwt.encode(payload, config("SECRET_KEY"), algorithm="HS256")
 
         return token
 
@@ -87,32 +89,31 @@ class Authenticator:
         rand = random.randint(100000, 999999)
         return rand
 
-    def send_otp(self, email=None, phone=None):
+    def send_otp(self, email=None, phone=None, full_name=None):
         try:
             otp = self.generate_otp()
             logger.info(f"otp generated: {otp}")
 
             if email:
-                cache.set(email, otp, timeout=300)
-                context = {
-                    "template": "otp",
-                    "subject": "OTP Verification",
-                    "context": {"otp": otp},
-                }
-
-                mail = send_notification.delay(
-                    recipient=email,
-                    context=context,
+                cache.set(email, otp, timeout=600)
+                
+                service.send_otp(
+                    email_address=email,
+                    otp=otp,
+                    expires_in_minutes=10,
+                    full_name=full_name,
                 )
+                
                 logger.info(f"OTP email sent to {email}")
 
             if phone:
                 cache.set(phone, otp, timeout=300)
-                # sms = notify.send_notification.delay(
-                #     medium="sms",
-                #     recipient=phone,
-                #     message = f"Your HMS OTP code is {otp}. It is valid for 5 minutes.",
-                # )
+                service.send_otp(
+                    phone_number=phone,
+                    otp=otp,
+                    expires_in_minutes=10,
+                    full_name=full_name
+                )
                 logger.info(f"OTP sms sent to {phone}")
 
             else:
@@ -214,7 +215,7 @@ class Authenticator:
             }
         )
 
-    def send_reset_password(self, field, password):
+    def send_reset_password(self, field, password=None, full_name=None):
         try:
             if "@" in field:
                 if not re.match(r"[^@]+@[^@]+\.[^@]+", field):
@@ -225,15 +226,10 @@ class Authenticator:
                         }
                     )
 
-                context = {
-                    "template": "reset_password",
-                    "subject": "Reset Password",
-                    "context": {"password": password},
-                }
-
-                mail = send_notification.delay(
-                    recipient=field,
-                    context=context,
+                service.send_temporary_password(
+                    email_address=field,
+                    password=password,
+                    full_name=full_name,
                 )
                 logger.info(f"Reset password email sent to {field}")
 
@@ -246,12 +242,11 @@ class Authenticator:
                         }
                     )
 
-                # sms = notify.send_notification.delay(
-                #     medium="sms",
-                #     recipient=field,
-                #     message = f"Your HMS password is {password}. It is valid for  3hours. Please Change it after login ",
-                # )
-
+                service.send_temporary_password(
+                    phone_number=field,
+                    password=password,
+                    full_name=full_name
+                )
                 logger.info(f"Reset password sms sent to {field}")
 
         except Exception as e:
