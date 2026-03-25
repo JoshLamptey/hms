@@ -82,6 +82,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
             "first_name",
             "middle_name",
             "last_name",
+            "email",
             "phone_number",
             "gender",
             "image",

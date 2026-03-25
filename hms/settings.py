@@ -12,6 +12,7 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 
 from pathlib import Path
 from decouple import config
+from celery.schedules import crontab
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -42,25 +43,26 @@ INSTALLED_APPS = [
     "rest_framework",
     "drf_spectacular",
     "post_office",
-    "csp",
+    # "csp",
     "django_extensions",
     "django_celery_results",
     "django_celery_beat",
     "apps.users",
     "apps.client",
+    "apps.notifications"
 ]
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
-    "csp.middleware.CSPMiddleware",
+    # "csp.middleware.CSPMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "church.middleware.PermissionsPolicyMiddleware",
+    "hms.middleware.PermissionsPolicyMiddleware",
 ]
 
 ROOT_URLCONF = "hms.urls"
@@ -126,20 +128,21 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
 
 
-    # uncomment after setting up rate
-    # "DEFAULT_THROTTLE_CLASSES": [
-    #     "rest_framework.throttling.UserRateThrottle",
-    #     "rest_framework.throttling.ScopedRateThrottle",
-    # ],
-    # "DEFAULT_THROTTLE_RATES": {
-    #     "user": "100/min",
+    
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.ScopedRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "user": "100/min",
 
-    #     # Auth endpoints
-    #     "login": "3/min",
-    #     "passwordless_login": "3/min",
-    #     "forgot_password": "3/min",
-    #     "refresh_token": "2/min",
-    # },
+        # Auth endpoints
+        "login": "3/min",
+        "passwordless_login": "3/min",
+        "forgot_password": "3/min",
+        "refresh_token": "2/min",
+        "reset_password": "3/min",
+    },
 }
 
 
@@ -285,4 +288,13 @@ PERMISSIONS_POLICY = {
     "payment": [],
     "usb": [],
     "fullscreen": ["self"],
+}
+
+
+CELERY_BEAT_SCHEDULE = {
+    # Retry failed SMS/email notifications every hour
+    "retry-failed-notifications": {
+        "task": "apps.notifications.tasks.retry_failed_notifications",
+        "schedule": crontab(minute=0),  # top of every hour
+    },
 }

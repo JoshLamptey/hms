@@ -41,9 +41,6 @@ class Tenant(models.Model):
         return self.name
 
     def save(self, *args, **kwargs):
-        if not self.org_slug:
-            slug = self.email.split("@")[1]
-            self.org_slug = slug.split(".")[0]
         return super().save(*args, **kwargs)
 
 

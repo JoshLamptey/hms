@@ -16,7 +16,6 @@ from apps.client.serializers import LicenseListSerializer
 from apps.users.auth import Authenticator
 from rest_framework import viewsets, status, permissions
 from rest_framework.response import Response
-from django.core.exceptions import ObjectDoesNotExist
 from apps.users.models import UserGroup, UserRole, User
 from apps.users.perms import CustomPermission
 from apps.users.serializers import (
@@ -33,15 +32,17 @@ from rest_framework.throttling import (
     UserRateThrottle,
 )
 from rest_framework.exceptions import PermissionDenied
-from apps.users.utils import send_login_credentials
+from apps.notifications.service import NotificationService
+from drf_spectacular.utils import extend_schema, OpenApiResponse, OpenApiExample
+from drf_spectacular.types import OpenApiTypes
 from decouple import config
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.hashers import check_password, make_password
 from django.core.exceptions import ValidationError
-from django.contrib.auth import get_user_model
 
 auth = Authenticator()
 logger = logging.getLogger(__name__)
+service = NotificationService()
 
 
 class UserRoleViewset(viewsets.ModelViewSet):
@@ -137,7 +138,6 @@ CLIENT_EXCLUDED_APPS = [
     "client",
 ]
 
-
 ALL_EXCLUDED_APPS = EXCLUDED_APPS + CLIENT_EXCLUDED_APPS
 
 
@@ -146,6 +146,45 @@ class PermissionViewset(viewsets.ViewSet):
     ViewSet to list all available permissions in the system.
     """
 
+    @extend_schema(
+        summary="List all permissions",
+        description="Returns all available permissions in the system grouped by model name",
+        responses={
+            200: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="Permissions grouped by model",
+                examples=[
+                    OpenApiExample(
+                        "Success Response",
+                        value={
+                            "success": True,
+                            "info": {
+                                "user": [
+                                    {
+                                        "id": 1,
+                                        "name": "Can add user",
+                                        "codename": "add_user",
+                                    },
+                                    {
+                                        "id": 2,
+                                        "name": "Can change user",
+                                        "codename": "change_user",
+                                    },
+                                ],
+                                "license": [
+                                    {
+                                        "id": 10,
+                                        "name": "Can view license",
+                                        "codename": "view_license",
+                                    }
+                                ],
+                            },
+                        },
+                    )
+                ],
+            )
+        },
+    )
     def list(self, request, *args, **kwargs):
         permissions = Permission.objects.select_related("content_type")
         grouped_permissions = {}
@@ -154,7 +193,7 @@ class PermissionViewset(viewsets.ViewSet):
         is_super_admin = (
             user.is_authenticated
             and getattr(user, "role", None)
-            and user.role.name == "super_admin"
+            and user.role.name == "SUPER_ADMIN"
         )
 
         for perm in permissions:
@@ -176,13 +215,13 @@ class PermissionViewset(viewsets.ViewSet):
                 }
             )
 
-            return Response(
-                {
-                    "success": True,
-                    "info": grouped_permissions,
-                },
-                status=status.HTTP_200_OK,
-            )
+        return Response(
+            {
+                "success": True,
+                "info": grouped_permissions,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     # I don't understand this yet i will touch it tomorrow
     # @action(detail=False, methods=["get"], url_path="fetch-organization-permissions")
@@ -235,14 +274,14 @@ class UserGroupViewset(viewsets.ModelViewSet):
         user = self.request.user
         qs = self.queryset
 
-        if user.role == UserRole.Role.SUPER_ADMIN:
+        if user.role and user.role.name == UserRole.Role.SUPER_ADMIN:
             return qs.filter(is_global=True)
 
         return qs.filter(
             is_global=False,
-            tenant__org_slug=user.org_slug,
+            tenant=user.tenant, 
         )
-
+        
     def list(self, request, *args, **kwargs):
         queryset = self.filter_queryset(self.get_queryset())
         serializer = self.get_serializer(queryset, many=True)
@@ -461,7 +500,7 @@ class UserViewset(viewsets.ModelViewSet):
     lookup_field = "uid"
     throttle_classes = [ScopedRateThrottle, UserRateThrottle]
 
-    def get_serializer(self):
+    def get_serializer_class(self):
         if self.action == "create":
             return UserCreateSerializer
 
@@ -478,7 +517,7 @@ class UserViewset(viewsets.ModelViewSet):
     def get_queryset(self):
         user = self.request.user
 
-        if user.role.name == "super_admin":
+        if user.role.name == "SUPER_ADMIN":
             return self.queryset
 
         return self.queryset.filter(tenant__org_slug=user.org_slug)
@@ -495,7 +534,7 @@ class UserViewset(viewsets.ModelViewSet):
 
         user = self.request.user
 
-        if user.role.name in ["admin_user", "super_admin"]:
+        if user.role.name in ["ADMIN_USER", "SUPER_ADMIN"]:
             return obj
 
         if obj.id != user.id:
@@ -563,7 +602,7 @@ class UserViewset(viewsets.ModelViewSet):
         )
 
     def list(self, request, *args, **kwargs):
-        if request.user.role.name not in ["super_admin"]:
+        if request.user.role.name not in ["SUPER_ADMIN"]:
             raise PermissionDenied("You do not have permission to view this list.")
 
         queryset = self.filter_queryset(self.get_queryset())
@@ -577,83 +616,115 @@ class UserViewset(viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
+
+
     def create(self, request, *args, **kwargs):
-        data = request.data
+        try:
+            
+            data = request.data.copy()
 
-        required_fields = [
-            "first_name",
-            "last_name",
-            "role",
-            "email",
-            "phone_number",
-            "gender",
-            "tenant",
-        ]
+            required_fields = [
+                "first_name",
+                "last_name",
+                "role",
+                "email",
+                "phone_number",
+                "gender",
+                "tenant",
+            ]
+            
+            for field in required_fields:
+                if not data.get(field):
+                    return Response(
+                        {
+                            "success": False,
+                            "info": f"{field} is required.",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            
+            tenant = Tenant.objects.filter(id=data.get("tenant")).first()
 
-        for field in required_fields:
-            if not data.get(field):
+            if not tenant:
                 return Response(
                     {
                         "success": False,
-                        "info": f"{field} is required.",
+                        "info": "Tenant does not exist.",
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+                
+            data["org_slug"] = tenant.org_slug
 
-        tenant = Tenant.objects.filter(id=data.get("tenant")).first()
-
-        if not tenant:
-            return Response(
-                {
-                    "success": False,
-                    "info": "Tenant does not exist.",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        data["org_slug"] = tenant.org_slug
-
-        if User.objects.filter(
-            Q(email=data.get("email")) | Q(phone_number=data.get("phone_number")),
-            org_slug=tenant.org_slug,
-        ).exists():
-            return Response(
-                {
-                    "success": False,
-                    "info": "User already exists.",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if data.get("password"):
-            try:
-                validate_password(data.get("password"))
-                hashed_password = make_password(data.get("password"))
-                data["password"] = hashed_password
-            except ValidationError as e:
+            if User.objects.filter(
+                Q(email=data.get("email")) | Q(phone_number=data.get("phone_number")),
+                org_slug=tenant.org_slug,
+            ).exists():
                 return Response(
                     {
                         "success": False,
-                        "info": e.messages,
+                        "info": "User already exists.",
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            
+            
+            if not data.get("username"):
+                
+                base = f"{data.get('first_name', '').lower()}_{data.get('last_name', '').lower()}"
+                username = base
+                counter = 1
+                while User.objects.filter(username=username).exists():
+                    username = f"{base}_{counter}"
+                    counter += 1
+                data["username"] = username
+            
+            if data.get("password"):
+                try:
+                    validate_password(data.get("password"))
+                    hashed_password = make_password(data.get("password"))
+                    data["password"] = hashed_password
+                    
+                    email=data.get("email")
+                    full_name = f"{data.get('first_name')} {data.get('last_name')}"
+                    
+                    service.send_login_credentials(
+                        to = email,
+                        full_name=full_name,
+                        password=data.get("password")
+                    )
+                except ValidationError as e:
+                    return Response(
+                        {
+                            "success": False,
+                            "info": e.messages,
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+        
+            
+            serializer = self.get_serializer(data=data)
+            serializer.is_valid(raise_exception=True)
+            
+            
+            self.perform_create(serializer)
+            
+            return Response(
+                {
+                    "success": True,
+                    "info": "User created successfully.",
+                },
+                status=status.HTTP_201_CREATED,
+            )
+        
+        except Exception as e:
+            logger.exception(f"User create failed {str(e)} ")  # this logs the full traceback
+            return Response({"success": False, "info": "Failed to create user."}, status=500)
 
-        serializer = self.get_serializer(data=data)
-        serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
 
-        return Response(
-            {
-                "success": True,
-                "info": "User created successfully.",
-            },
-            status=status.HTTP_201_CREATED,
-        )
 
     @action(detail=False, methods=["post"], url_path="update-password")
     def update_password(self, request, pk=None):
-        print(request.data)
         data = request.data
         field = data.get("field")
         password = data.get("password")
@@ -707,6 +778,7 @@ class UserViewset(viewsets.ModelViewSet):
             validate_password(password, user=user)
             hashed_password = make_password(password)
             user.password = hashed_password
+            
         except ValidationError as e:
             return Response(
                 {
@@ -721,7 +793,42 @@ class UserViewset(viewsets.ModelViewSet):
         user.save(update_fields=["password", "password_changed", "login_enabled"])
 
         RefreshToken.objects.filter(user=user).update(is_revoked=True)
+        
+         # blacklist the access token in Redis
+        auth_header = request.headers.get("Authorization")
 
+        if auth_header:
+            try:
+                prefix, token = auth_header.split(" ")
+
+                if prefix.lower() != "bearer":
+                    return Response(
+                        {
+                            "success": False,
+                            "info": "Invalid token prefix.",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                payload = jwt.decode(
+                    token,
+                    config("SECRET_KEY"),
+                    algorithms=["HS256"],
+                    options={"verify_exp": False},
+                )
+
+                jti = payload.get("jti")
+                exp = payload.get("exp")
+
+                if jti and exp:
+                    ttl = exp - int(arrow.utcnow().timestamp())
+
+                    if ttl > 0:
+                        cache.set(f"blacklist:access:{jti}", "blacklisted", timeout=ttl)
+            except Exception as e:
+                print(f"Error blacklisting access token: {str(e)}")
+                pass
+        
         return Response(
             {
                 "success": True,
@@ -729,6 +836,173 @@ class UserViewset(viewsets.ModelViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+    @action(
+        detail=False,
+        methods=["post"],
+        permission_classes=[permissions.AllowAny],
+        url_path="reset-password",
+        throttle_classes=[ScopedRateThrottle],
+    )
+    def reset_password(self, request, pk=None):
+        data = request.data
+        field = data.get("field")
+        reset_token = data.get("reset_token")
+        password = data.get("password")
+        confirm_password = data.get("confirm_password")
+        
+        user = request.user
+        
+        if not field:
+            return Response(
+                {"success": False, "info": "field is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not reset_token:
+            return Response(
+                {"success": False, "info": "reset_token is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+
+        if not password:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Password is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not confirm_password:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Confirm Password is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if password != confirm_password:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Passwords do not match.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            validate_password(password, user=user)
+            hashed_password = make_password(password)
+            user.password = hashed_password
+            
+        except ValidationError as e:
+            return Response(
+                {
+                    "success": False,
+                    "info": e.messages,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        
+        # decode the reset token
+        try:
+            payload = jwt.decode(reset_token, config("SECRET_KEY"), algorithms=["HS256"])
+        except jwt.ExpiredSignatureError:
+            return Response(
+                {"success": False, "info": "Reset token has expired"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+        except jwt.InvalidTokenError:
+            return Response(
+                {"success": False, "info": "Invalid reset token"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        # ensure token is scoped correctly
+        if payload.get("type") != "password_reset":
+            return Response(
+                {"success": False, "info": "Invalid token type"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        phone_number = payload.get("phone_number")
+
+        # verify token exists in redis and matches
+        cached_token = cache.get(f"reset_token:{phone_number}")
+        
+        if isinstance(cached_token, bytes):
+            cached_token = cached_token.decode("utf-8")
+
+        if not cached_token or cached_token != reset_token:
+            return Response(
+                {"success": False, "info": "Reset token is invalid or already used"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        # get user from phone in token
+        try:
+            user = User.objects.get(phone_number=phone_number)
+        except User.DoesNotExist:
+            return Response(
+                {"success": False, "info": "User not found"},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        # match the field sent by frontend against the token's phone number
+        if field != str(user.phone_number or user.email):
+            return Response(
+                {"success": False, "info": "field does not match the reset token"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        if not password:
+            return Response(
+                {"success": False, "info": "password is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not confirm_password:
+            return Response(
+                {"success": False, "info": "confirm_password is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if password != confirm_password:
+            return Response(
+                {"success": False, "info": "passwords do not match"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            validate_password(password, user=user)
+        except ValidationError as e:
+            return Response(
+                {"success": False, "info": e.messages},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        hashed_password = make_password(password)
+        user.set_password(hashed_password)
+        user.password_changed = True
+        user.login_enabled = True
+        user.save(update_fields=["password", "password_changed", "login_enabled"])
+
+        # invalidate token immediately — one time use
+        cache.delete(f"reset_token:{phone_number}")
+
+        RefreshToken.objects.filter(user=user).update(is_revoked=True)
+
+        return Response(
+            {"success": True, "info": "password updated successfully"},
+            status=status.HTTP_202_ACCEPTED,)
+        
+    reset_password.throttle_scope = "reset_password"
+    
+
+
 
     @action(
         detail=False,
@@ -758,7 +1032,7 @@ class UserViewset(viewsets.ModelViewSet):
                 {"success": True, "info": f"OTP sent successfully to {field}"},
                 status=status.HTTP_200_OK,
             )
-
+        full_name = user.get_full_name() 
         try:
             if "@" in field:
                 if not re.match(r"[^@]+@[^@]+\.[^@]+", field):
@@ -768,10 +1042,12 @@ class UserViewset(viewsets.ModelViewSet):
                             "info": "Invalid email format.",
                         }
                     )
-                auth.send_otp(email=field)
+                
+                auth.send_otp(email=field, full_name=full_name)
 
             elif re.match(r"^\+?\d{7,15}$", field):
-                auth.send_otp(phone=field)
+                auth.send_otp(phone=field, full_name=full_name)
+                
 
             else:
                 return Response(
@@ -834,10 +1110,13 @@ class UserViewset(viewsets.ModelViewSet):
             verify = auth.verify_otp(phone=field, user_entered_otp=otp)
 
         if verify:
+            user = User.objects.filter(Q(email=field) | Q(phone_number=field)).first()
+            temp_token = auth.generate_reset_token(user)
             return Response(
                 {
                     "success": True,
                     "info": "OTP verified successfully.",
+                    "temp_token": temp_token,
                 },
                 status=status.HTTP_200_OK,
             )
@@ -886,12 +1165,12 @@ class UserViewset(viewsets.ModelViewSet):
             )
 
             if valid_license:
-                logger.info(f"Valid license found until {valid_license.expiry_date}")
+                logger.warning(f"Valid license found until {valid_license.expiry_date}")
 
                 if not valid_license.users.filter(pk=user.pk).exists():
                     logger.warning(f"{user} failed license check")
-                    # valid_license.users.add(user)
-                    # logger.info(f"User {user} added to license users")
+                    valid_license.users.add(user)
+                    logger.info(f"User {user} added to license users")
                     return False
 
                 logger.info(f"{user} passed license check")
@@ -944,7 +1223,7 @@ class UserViewset(viewsets.ModelViewSet):
 
         now = arrow.now().datetime
 
-        if not user.role.name == "super_admin":
+        if not user.role.name == "SUPER_ADMIN":
             if not user.password_changed and user.password_expiry <= now:
                 logger.warning(
                     f"Blocked: expired password for {user.email}, expiry={user.password_expiry}, now={now}"
@@ -971,7 +1250,7 @@ class UserViewset(viewsets.ModelViewSet):
                 user.org_slug, email=user.email, phone=user.phone_number
             )
 
-            if not license_status and user.role.name != "super_admin":
+            if not license_status and user.role.name != "SUPER_ADMIN":
                 return Response(
                     {"success": False, "info": "Your organisation license is expired"},
                     status=status.HTTP_401_UNAUTHORIZED,
@@ -1147,21 +1426,21 @@ class UserViewset(viewsets.ModelViewSet):
                 return Response(
                     {
                         "success": True,
-                        "info": f"OTP sent successfully to {field}, If user exists",
+                        "info": f"OTP sent successfully to {field}",
                     },
                     status=status.HTTP_200_OK,
                 )
-
+            full_name = user.get_full_name() 
             license_status = self.check_user_license_status(
                 user.org_slug, email=user.email, phone=user.phone_number
             )
 
-            if not license_status and user.role.name != "super_admin":
+            if not license_status and user.role.name != "SUPER_ADMIN":
                 logger.warning("license for user not found or expired")
                 return Response(
                     {
                         "success": True,
-                        "info": f"OTP sent successfully to {field}, If user exists",
+                        "info": f"OTP sent successfully to {field}",
                     },
                     status=status.HTTP_200_OK,
                 )
@@ -1172,12 +1451,11 @@ class UserViewset(viewsets.ModelViewSet):
                         {"success": False, "info": "Invalid Email or Phone Number"},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-
-                auth.send_otp(email=field)
+                auth.send_otp(email=field, full_name=full_name)
                 print(f"OTP sent to email {field}")
 
             elif re.match(r"^\+?\d{7,15}$", field):
-                auth.send_otp(phone=field)
+                auth.send_otp(phone=field, full_name=full_name)
                 print(f"OTP sent to phone number {field}")
 
             else:
@@ -1415,22 +1693,23 @@ class UserViewset(viewsets.ModelViewSet):
                 )
 
             user = User.objects.filter(Q(email=field) | Q(phone_number=field)).first()
+            
 
             if not user:
                 logger.warning(f"User with field {field} does not exist.")
                 return Response(
-                    {"success": True, "info": f"New password sent to {field}"},
+                    {"success": True, "info": "Password reset successful."},
                     status=status.HTTP_200_OK,
                 )
 
             new_password = "".join(
                 random.choices(string.ascii_letters + string.digits, k=12)
             )
+            full_name = user.get_full_name() 
             user.set_password(new_password)
             user.password_expiry = arrow.now().shift(days=+3).datetime
-            user.login_enabled = False
-            user.save(update_fields=["password", "password_expiry", "login_enabled"])
-            auth.send_reset_password(field=field, password=new_password)
+            user.save(update_fields=["password", "password_expiry",])
+            auth.send_reset_password(field=field, password=new_password, full_name=full_name)
 
             return Response(
                 {"success": True, "info": "Password reset successful."},
@@ -1557,6 +1836,8 @@ class UserViewset(viewsets.ModelViewSet):
                     if ttl > 0:
                         cache.set(
                             f"blacklist:refresh:{refresh_jti}",
+                            "blacklisted",  # ← value
+                            timeout=ttl,    # ← timeout
                         )
 
                 RefreshToken.objects.filter(jti=refresh_jti).update(is_revoked=True)
@@ -1605,8 +1886,7 @@ class UserViewset(viewsets.ModelViewSet):
                     ttl = exp - int(arrow.utcnow().timestamp())
 
                     if ttl > 0:
-                        cache.set(f"blacklist:access:{jti}", timeout=ttl)
-
+                        cache.set(f"blacklist:access:{jti}", "blacklisted", timeout=ttl)
             except Exception as e:
                 print(f"Error blacklisting access token: {str(e)}")
                 pass
@@ -1618,3 +1898,166 @@ class UserViewset(viewsets.ModelViewSet):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class FetchOrgUsers(viewsets.ModelViewSet):
+    content_model = User
+    permission_classes = [CustomPermission]
+    serializer_class = UserListSerializer
+
+    def get_queryset(self):
+        return User.objects.filter(org_slug=self.request.user.org_slug).order_by("id")
+
+    def list(self, request, *args, **kwargs):
+        try:
+            users = User.objects.filter(org_slug=self.request.user.org_slug).order_by(
+                "id"
+            )
+
+            serializer = self.get_serializer(users, many=True)
+
+            return Response(
+                {
+                    "success": True,
+                    "info": serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.error(f"Error fetching org users: {str(e)}", exc_info=True)
+
+            return Response(
+                {
+                    "success": False,
+                    "info": "Failed to fetch organisation users.",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class FetchOrgUserGroups(viewsets.ReadOnlyModelViewSet):
+    """
+    API endpoint to fetch all user groups belonging to the requesting user's organization
+    """
+
+    content_model = UserGroup
+    permission_classes = [CustomPermission]
+    serializer_class = UserGroupListSerializer
+
+    def list(self, request, *args, **kwargs):
+        try:
+            user_groups = (
+                UserGroup.objects.filter(tenant=request.user.tenant)
+                .all()
+                .order_by("-created_at")
+            )
+
+            serializer = self.serializer_class(user_groups, many=True)
+
+            return Response(
+                {
+                    "success": True,
+                    "info": serializer.data,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        except Exception as e:
+            logger.error(f"Error fetching org user groups: {str(e)}")
+            return Response(
+                {
+                    "success": False,
+                    "info": "Failed to fetch organisation user groups.",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class SystemLogsViewset(viewsets.ViewSet):
+    """
+    Endpoints for system-level utilities like log downloads.
+    """
+
+    @extend_schema(
+        summary="Download debug log file",
+        description="Downloads the debug.log file. Only accessible by super admins.",
+        responses={
+            200: OpenApiResponse(
+                description="Debug log file",
+                # This indicates a file download response
+            ),
+            403: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="Forbidden - Not a super admin",
+                examples=[
+                    OpenApiExample(
+                        "Forbidden Response",
+                        value={
+                            "success": False,
+                            "info": "Hate to be that way, but you ain't allowed here big dawg!!",
+                        },
+                    )
+                ],
+            ),
+            404: OpenApiResponse(description="Debug log file not found"),
+            500: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description="Server error",
+                examples=[
+                    OpenApiExample(
+                        "Error Response",
+                        value={
+                            "success": False,
+                            "info": "Failed to download debug log.",
+                        },
+                    )
+                ],
+            ),
+        },
+    )
+    @action(detail=False, methods=["get"], url_path="download-debug-log")
+    def download_debug_log(self, request):
+        try:
+            if request.user.role.name != "SUPER_ADMIN":
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Hate to be that way, but you ain't allowed here big dawg!!",
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            if not request.user.is_superuser:
+                return Response(
+                    {
+                        "success": False,
+                        "info": "Are you supposed to be here?!, Exactly! Exit is that way chale!",
+                    },
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            base_dir = settings.BASE_DIR
+            log_path = os.path.join(base_dir, "debug.log")
+
+            if not os.path.exists(log_path):
+                raise Http404("debug.log file not found")
+
+            response = FileResponse(
+                open(log_path, "rb"),
+                as_attachment=True,
+                filename="debug.log",
+                content_type="text/plain",
+            )
+
+            return response
+
+        except Exception as e:
+            logger.error(f"Error downloading debug log: {str(e)}")
+            return Response(
+                {
+                    "success": False,
+                    "info": "Failed to download debug log.",
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )

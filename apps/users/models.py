@@ -4,11 +4,13 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.utils.translation import gettext_lazy as t
 from django.contrib.auth.hashers import make_password
-from apps.users.utils import send_login_credentials
+from apps.notifications.service import NotificationService
 from phonenumber_field.modelfields import PhoneNumberField
 from django.contrib.auth.models import Permission
 from decouple import config
 from django.utils import timezone
+
+service = NotificationService()
 
 
 class UserGroup(models.Model):
@@ -92,6 +94,7 @@ class User(AbstractUser):
         blank=True,
         null=True,
     )
+    image = models.ImageField(upload_to="users/", null=True, blank=True)
     password = models.CharField(max_length=128, blank=True, null=True)
     is_blocked = models.BooleanField(default=False)
     blocked_at = models.DateTimeField(blank=True, null=True)
@@ -107,19 +110,30 @@ class User(AbstractUser):
         ordering = ["-created_at"]
 
     def generate_temporary_password(self):
-        temp_password = uuid.uuid4().hex[:8]
-        self.password = make_password(temp_password)
-        self.password_changed = False
-        self.password_expiry = arrow.now().shift(days=+7).datetime
-        self.save()
-        send_login_credentials(self.email, temp_password)
+        temp_password = uuid.uuid4().hex[:12]
         return temp_password
+    
 
     def save(self, *args, **kwargs):
+        temp_password = None
+
         if not self.password:
-            self.password = self.generate_temporary_password()
+            temp_password = self.generate_temporary_password()
+            self.set_password(temp_password)
+            self.password_changed = False
+            self.password_expiry = arrow.now().shift(days=+7).datetime
 
         super().save(*args, **kwargs)
+
+        if temp_password and self.email:
+            email = self.email
+
+            full_name = self.get_full_name()
+            service.send_login_credentials(
+                to=email,
+                password=temp_password,
+                full_name=full_name,
+            )
 
     def is_password_expired(self):
         if self.password_expiry and timezone.now() > self.password_expiry:

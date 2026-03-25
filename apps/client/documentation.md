@@ -380,11 +380,3 @@ Empty test file, placeholder for unit tests.
 ### ClientConfig
 
 Standard AppConfig with BigAutoField.
-
-## Notes
-
-- Many files have commented-out code for features not yet implemented (middleware, tasks, commands).
-- Uses arrow for date handling, phonenumbers for validation.
-- Multi-tenant via PostgreSQL schemas.
-- Permissions use CustomPermission from users app.
-- Serializers use decouple for BASE_URL
