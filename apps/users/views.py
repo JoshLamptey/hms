@@ -616,86 +616,112 @@ class UserViewset(viewsets.ModelViewSet):
             status=status.HTTP_200_OK,
         )
 
+
+
     def create(self, request, *args, **kwargs):
-        data = request.data
+        try:
+            
+            data = request.data.copy()
 
-        required_fields = [
-            "first_name",
-            "last_name",
-            "role",
-            "email",
-            "phone_number",
-            "gender",
-            "tenant",
-        ]
+            required_fields = [
+                "first_name",
+                "last_name",
+                "role",
+                "email",
+                "phone_number",
+                "gender",
+                "tenant",
+            ]
+            
+            for field in required_fields:
+                if not data.get(field):
+                    return Response(
+                        {
+                            "success": False,
+                            "info": f"{field} is required.",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            
+            tenant = Tenant.objects.filter(id=data.get("tenant")).first()
 
-        for field in required_fields:
-            if not data.get(field):
+            if not tenant:
                 return Response(
                     {
                         "success": False,
-                        "info": f"{field} is required.",
+                        "info": "Tenant does not exist.",
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+                
+            data["org_slug"] = tenant.org_slug
 
-        tenant = Tenant.objects.filter(id=data.get("tenant")).first()
-
-        if not tenant:
-            return Response(
-                {
-                    "success": False,
-                    "info": "Tenant does not exist.",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        data["org_slug"] = tenant.org_slug
-
-        if User.objects.filter(
-            Q(email=data.get("email")) | Q(phone_number=data.get("phone_number")),
-            org_slug=tenant.org_slug,
-        ).exists():
-            return Response(
-                {
-                    "success": False,
-                    "info": "User already exists.",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if data.get("password"):
-            try:
-                validate_password(data.get("password"))
-                hashed_password = make_password(data.get("password"))
-                data["password"] = hashed_password
-            except ValidationError as e:
+            if User.objects.filter(
+                Q(email=data.get("email")) | Q(phone_number=data.get("phone_number")),
+                org_slug=tenant.org_slug,
+            ).exists():
                 return Response(
                     {
                         "success": False,
-                        "info": e.messages,
+                        "info": "User already exists.",
                     },
                     status=status.HTTP_400_BAD_REQUEST,
                 )
-        email=data.get("email")
-        full_name = f"{data.get('first_name')} {data.get('last_name')}"
+            
+            
+            if not data.get("username"):
+                
+                base = f"{data.get('first_name', '').lower()}_{data.get('last_name', '').lower()}"
+                username = base
+                counter = 1
+                while User.objects.filter(username=username).exists():
+                    username = f"{base}_{counter}"
+                    counter += 1
+                data["username"] = username
+            
+            if data.get("password"):
+                try:
+                    validate_password(data.get("password"))
+                    hashed_password = make_password(data.get("password"))
+                    data["password"] = hashed_password
+                    
+                    email=data.get("email")
+                    full_name = f"{data.get('first_name')} {data.get('last_name')}"
+                    
+                    service.send_login_credentials(
+                        to = email,
+                        full_name=full_name,
+                        password=data.get("password")
+                    )
+                except ValidationError as e:
+                    return Response(
+                        {
+                            "success": False,
+                            "info": e.messages,
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
         
-        service.send_login_credentials(
-            to = email,
-            full_name=full_name,
-            password=data.get("password")
-        )
+            
+            serializer = self.get_serializer(data=data)
+            serializer.is_valid(raise_exception=True)
+            
+            
+            self.perform_create(serializer)
+            
+            return Response(
+                {
+                    "success": True,
+                    "info": "User created successfully.",
+                },
+                status=status.HTTP_201_CREATED,
+            )
+        
+        except Exception as e:
+            logger.exception(f"User create failed {str(e)} ")  # this logs the full traceback
+            return Response({"success": False, "info": "Failed to create user."}, status=500)
 
-        serializer = self.get_serializer(data=data)
-        serializer.is_valid(raise_exception=True)
 
-        return Response(
-            {
-                "success": True,
-                "info": "User created successfully.",
-            },
-            status=status.HTTP_201_CREATED,
-        )
 
     @action(detail=False, methods=["post"], url_path="update-password")
     def update_password(self, request, pk=None):
@@ -752,6 +778,7 @@ class UserViewset(viewsets.ModelViewSet):
             validate_password(password, user=user)
             hashed_password = make_password(password)
             user.password = hashed_password
+            
         except ValidationError as e:
             return Response(
                 {
@@ -766,7 +793,42 @@ class UserViewset(viewsets.ModelViewSet):
         user.save(update_fields=["password", "password_changed", "login_enabled"])
 
         RefreshToken.objects.filter(user=user).update(is_revoked=True)
+        
+         # blacklist the access token in Redis
+        auth_header = request.headers.get("Authorization")
 
+        if auth_header:
+            try:
+                prefix, token = auth_header.split(" ")
+
+                if prefix.lower() != "bearer":
+                    return Response(
+                        {
+                            "success": False,
+                            "info": "Invalid token prefix.",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                payload = jwt.decode(
+                    token,
+                    config("SECRET_KEY"),
+                    algorithms=["HS256"],
+                    options={"verify_exp": False},
+                )
+
+                jti = payload.get("jti")
+                exp = payload.get("exp")
+
+                if jti and exp:
+                    ttl = exp - int(arrow.utcnow().timestamp())
+
+                    if ttl > 0:
+                        cache.set(f"blacklist:access:{jti}", "blacklisted", timeout=ttl)
+            except Exception as e:
+                print(f"Error blacklisting access token: {str(e)}")
+                pass
+        
         return Response(
             {
                 "success": True,
@@ -788,7 +850,9 @@ class UserViewset(viewsets.ModelViewSet):
         reset_token = data.get("reset_token")
         password = data.get("password")
         confirm_password = data.get("confirm_password")
-
+        
+        user = request.user
+        
         if not field:
             return Response(
                 {"success": False, "info": "field is required"},
@@ -801,6 +865,49 @@ class UserViewset(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+
+        if not password:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Password is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not confirm_password:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Confirm Password is required.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if password != confirm_password:
+            return Response(
+                {
+                    "success": False,
+                    "info": "Passwords do not match.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            validate_password(password, user=user)
+            hashed_password = make_password(password)
+            user.password = hashed_password
+            
+        except ValidationError as e:
+            return Response(
+                {
+                    "success": False,
+                    "info": e.messages,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        
         # decode the reset token
         try:
             payload = jwt.decode(reset_token, config("SECRET_KEY"), algorithms=["HS256"])
@@ -1005,7 +1112,6 @@ class UserViewset(viewsets.ModelViewSet):
         if verify:
             user = User.objects.filter(Q(email=field) | Q(phone_number=field)).first()
             temp_token = auth.generate_reset_token(user)
-            print(f"temp token generated {temp_token}")
             return Response(
                 {
                     "success": True,
@@ -1059,7 +1165,7 @@ class UserViewset(viewsets.ModelViewSet):
             )
 
             if valid_license:
-                logger.info(f"Valid license found until {valid_license.expiry_date}")
+                logger.warning(f"Valid license found until {valid_license.expiry_date}")
 
                 if not valid_license.users.filter(pk=user.pk).exists():
                     logger.warning(f"{user} failed license check")
@@ -1592,7 +1698,7 @@ class UserViewset(viewsets.ModelViewSet):
             if not user:
                 logger.warning(f"User with field {field} does not exist.")
                 return Response(
-                    {"success": True, "info": f"New password sent to {field}"},
+                    {"success": True, "info": "Password reset successful."},
                     status=status.HTTP_200_OK,
                 )
 
@@ -1602,8 +1708,7 @@ class UserViewset(viewsets.ModelViewSet):
             full_name = user.get_full_name() 
             user.set_password(new_password)
             user.password_expiry = arrow.now().shift(days=+3).datetime
-            user.login_enabled = False
-            user.save(update_fields=["password", "password_expiry", "login_enabled"])
+            user.save(update_fields=["password", "password_expiry",])
             auth.send_reset_password(field=field, password=new_password, full_name=full_name)
 
             return Response(

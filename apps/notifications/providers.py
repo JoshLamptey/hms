@@ -22,7 +22,7 @@ class ArkeselProvider:
 
     def __init__(self):
         self.api_key = config("ARKESEL_API_KEY")
-        self.sender_id = config("ARKESEL_SENDER_ID", default="HMS/NOTIFY")
+        self.sender_id = config("ARKESEL_SENDER_ID", default="HMS")
 
     def _build_url(self, phone_number: str, message: str, scheduled_time: str = None) -> str:
         url = (

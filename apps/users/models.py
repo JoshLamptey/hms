@@ -110,19 +110,30 @@ class User(AbstractUser):
         ordering = ["-created_at"]
 
     def generate_temporary_password(self):
-        temp_password = uuid.uuid4().hex[:8]
-        self.password = make_password(temp_password)
-        self.password_changed = False
-        self.password_expiry = arrow.now().shift(days=+7).datetime
-        full_name = self.get_full_name()
-        service.send_login_credentials(to=self.email,password=temp_password, full_name=full_name)
+        temp_password = uuid.uuid4().hex[:12]
         return temp_password
+    
 
     def save(self, *args, **kwargs):
+        temp_password = None
+
         if not self.password:
-            self.password = self.generate_temporary_password()
+            temp_password = self.generate_temporary_password()
+            self.set_password(temp_password)
+            self.password_changed = False
+            self.password_expiry = arrow.now().shift(days=+7).datetime
 
         super().save(*args, **kwargs)
+
+        if temp_password and self.email:
+            email = self.email
+
+            full_name = self.get_full_name()
+            service.send_login_credentials(
+                to=email,
+                password=temp_password,
+                full_name=full_name,
+            )
 
     def is_password_expired(self):
         if self.password_expiry and timezone.now() > self.password_expiry:
