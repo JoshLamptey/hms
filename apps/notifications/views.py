@@ -93,7 +93,6 @@ def _resolve_recipients(data:dict, org_slug:str)->tuple[list, str | None]:
 # ──────────────────────────────────────────────
  
 class CampaignViewSet(viewsets.ModelViewSet):
-    content_model = Campaign
     permission_classes = [CustomPermission]
     lookup_field = "uid"
     
@@ -253,7 +252,131 @@ class CampaignViewSet(viewsets.ModelViewSet):
             "success" : True,
             "info" : f"Retrying {failed_count} failed notification(s)"
         }, status=status.HTTP_200_OK)
+
+
+# ──────────────────────────────────────────────
+# NOTIFICATION VIEWSET
+# ──────────────────────────────────────────────
+ 
+ 
+
+class NotificationViewset(viewsets.ModelViewSet):
+    """
+    Handles in-app notifications for the currently authenticated user.
+ 
+    Endpoints:
+        GET    /notifications/                   — list current user's notifications
+        GET    /notifications/{uid}/             — retrieve a single notification
+        DELETE /notifications/{uid}/             — delete a notification
+        POST   /notifications/notify-user/       — admin sends direct notification to a user
+        PATCH  /notifications/{uid}/mark-read/   — mark a single notification as read
+        POST   /notifications/mark-all-read/     — mark all notifications as read
+        GET    /notifications/unread-count/      — unread count for bell badge
+    """
+    
+    permission_classes = [CustomPermission]
+    lookup_field = "uid"
+    
+    def get_queryset(self):
+        # Users only ever see their own in-app notifications
+        return Notification.objects.filter(
+            recipient=self.request.user,
+            channel="in_app"
+        ).select_related("sender", "campaign")
         
+    def get_serializer_class(self):
+        if self.action == "notify_user":
+            return NotificationCreateSerializer
+        return NotificationListSerializer
+    
+    
+    def list(self, request, *args, **kwargs):
+        queryset= self.get_queryset()
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({"success":True, "info":serializer.data}, status=status.HTTP_200_OK)
+    
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response({"success" : True, "info" : serializer.data}, status=status.HTTP_200_OK)
+    
+    def create(self, request, *args, **kwargs):
+        return Response({"succes": False, "info": "Use /notify-user/ to send a notification"}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+    
+    def update(self, request, *args, **kwargs):
+        return Response({"success": False, "info":"Use /mark-read/ to update a notification" }, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+    
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        instance.delete()
+        return Response({"success":True, "info" : "Notification deleted"}, status=status.HTTP_200_OK)
+    
+    @action(detail=False, methods=["post"], url_path="notify-user")
+    def notify_user(self,request, *args, **kwargs):
+        """
+        Send a direct in-app notification to a specific user.
+        Admin/staff only — enforced by CustomPermission.
+ 
+        Body: { "recipient": <user_id>, "message": "...", "subject": "..." }
+        """
+        serializer = self.get_serializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                "success" : False,
+                "info": serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+            
+            
+        data= serializer.validated_data
         
-        
-        
+        try:
+            service.notify_user(
+                sender=request.user,
+                recipient=data.get("recipient"),
+                message=data.get("message"),
+                subject=data.get("subject"),
+            )
+            return Response({
+                "success" : True,
+                "info" : "Notification sent successfully"
+            }, status=status.HTTP_201_CREATED)
+            
+        except Exception as e:
+            logger.error(f"notify_user error : {e}", exc_info=True)
+            return Response({
+                "success" : False,
+                "info" : "An error occured while sending the notification"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            
+    
+    @action(detail=True, methods=["patch"],url_path="mark-read")
+    def mark_read(self, request, *args, **kwargs):
+        """Mark a single notification as read."""
+        instance = self.get_object()
+        instance.mark_read()
+        return Response({"success": True, "info": "Notification marked as read"}, status=status.HTTP_200_OK)
+    
+    @action(detail=False, methods=["post"], url_path="mark-all-read")
+    def mark_all_read(self, request, *args, **kwargs):
+        """Mark all unread notifications as read for the current user."""
+        count = service.mark_all_read(request.user)
+        return Response({
+            "success": True,
+            "info": f"{count} notification(s) marked as read"
+        },status=status.HTTP_200_OK)
+    
+    
+    @action(detail=False, methods=["get"], url_path="unread-count")
+    def unread_count(self, request, *args, **kwargs):
+        """
+        Lightweight endpoint for the frontend notification bell badge.
+        Returns just the unread count — no need to fetch full notification list.
+        """
+        count = self.get_queryset().filter(is_read=False).count()
+        return Response({
+            "success" : True,
+            "info" : {
+                "unread_count" : count
+            }
+        }, status=status.HTTP_200_OK)
