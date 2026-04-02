@@ -26,13 +26,14 @@ SECRET_KEY = config("SECRET_KEY", cast=str)
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = config("ALLOWED_HOSTS").split(",")
 CSRF_TRUSTED_ORIGINS = config("CSRF_TRUSTED_ORIGINS").split(",")
 
 
 # Application definition
 
 INSTALLED_APPS = [
+    "daphne",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -47,6 +48,7 @@ INSTALLED_APPS = [
     "django_extensions",
     "django_celery_results",
     "django_celery_beat",
+    "channels",
     "apps.users",
     "apps.client",
     "apps.notifications"
@@ -257,9 +259,23 @@ POST_OFFICE = {
     "DEFAULT_FROM_EMAIL": "no-reply@ms.com"
     }
 
-CELERY_BROKER_URL = config("CELERY_BROKER_URL")
-CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND")
-CELERY_TIME_ZONE = config("CELERY_TIME_ZONE")
+CELERY_BROKER_URL = config("CELERY_BROKER_URL", default="redis://192.168.124.92:6379/0")
+CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default="redis://192.168.124.92:6379/0")
+CELERY_TIMEZONE = config("CELERY_TIME_ZONE", default="Africa/Accra")
+CELERY_TASK_ALWAYS_EAGER = False
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True  # fixes the deprecation warning too
+CELERY_BROKER_TRANSPORT = "redis"                  # keep this
+CELERY_BROKER_BACKEND = "redis"   
+CELERY_BROKER_TRANSPORT = "redis"
+CELERY_TASK_SERIALIZER = "json"
+CELERY_RESULT_SERIALIZER = "json"
+CELERY_ACCEPT_CONTENT = ["json"]# add this
+
+
+
+# Force Kombu to use Redis transport explicitly
+CELERY_BROKER_URL = "redis://192.168.124.92:6379/0" 
+
 
 EMAIL_USE_TLS = config("EMAIL_USE_TLS")
 EMAIL_HOST = config("EMAIL_HOST")

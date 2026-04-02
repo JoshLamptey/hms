@@ -53,35 +53,53 @@ class NotificationService:
         from .tasks import dispatch_campaign_task
 
         # Pop write-only fields that don't live on Campaign
-        data.pop("members", None)
-        data.pop("ministries", None)
+        data.pop("customers", None)  
+        data.pop("staff", None)
 
         with transaction.atomic():
             campaign = Campaign.objects.create(
                 **data,
                 created_by=created_by,
-                org_slug=org_slug,
+                org_slug=org_slug
             )
-
-            # Fan out — one Notification per recipient
+            
             notifications = []
-            for user in recipient_users:
-                address = self._resolve_address(user, campaign.channel)
-                notifications.append(
-                    Notification(
-                        campaign=campaign,
-                        recipient=user,
-                        sender=created_by,
-                        channel=campaign.channel,
-                        subject=campaign.subject,
-                        message=campaign.message,
-                        status="pending",
-                        recipient_address=address,
+            if campaign.target_type == "contact_upload":
+                
+                # Recipients come from the contact JSON field, not User records
+                for contact in (campaign.contact or []):
+                    address = contact.get("email") if campaign.channel else contact.get("phone_number")
+                    notifications.append(
+                        Notification(
+                            campaign=campaign,
+                            recipient=None,
+                            sender = created_by,
+                            channel= campaign.channel,
+                            subject=campaign.subject,
+                            message=campaign.message,
+                            status="pending",
+                            recipient_address=address
+                        )
                     )
-                )
-
+            else:
+                for user in recipient_users:
+                    address = self._resolve_address(user, campaign.channel)
+                    notifications.append(
+                        Notification(
+                            campaign=campaign,
+                            recipient=user,
+                            sender=created_by,
+                            channel=campaign.channel,
+                            subject=campaign.subject,
+                            message=campaign.message,
+                            status="pending",
+                            recipient_address=address,
+                        )
+                    )
+            
             Notification.objects.bulk_create(notifications)
-
+            
+            
         # Kick off sending — scheduled campaigns are handled by Celery beat
         if not campaign.is_scheduled:
             dispatch_campaign_task.delay(campaign.id)
@@ -130,10 +148,13 @@ class NotificationService:
             status="sent",
             sent_at=timezone.now(),
         )
+        
+        result = self._push_in_app(notification)
+        
+        if not result["success"]:
+            logger.warning(f"Websocket push failed for notification {notification.uid}: {result['message']}")
 
-        # Fire WebSocket push async so the view isn't blocked
-        push_in_app_notification_task.delay(notification.id)
-
+        
         return notification
 
     # ──────────────────────────────────────────────

@@ -81,7 +81,7 @@ class Notification(models.Model):
      # Link to campaign — null means this is a direct/task notification
     campaign = models.ForeignKey(Campaign,on_delete=models.CASCADE,null=True,blank=True,related_name="notifications",)
     # The user receiving this notification
-    recipient = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="notifications_recieved")
+    recipient = models.ForeignKey("users.User", on_delete=models.CASCADE, related_name="notifications_recieved", null=True, blank=True)
      # The user who triggered this (null for system-generated)
     sender = models.ForeignKey("users.User",on_delete=models.SET_NULL,null=True,blank=True,related_name="notifications_sent",)
     channel = models.CharField(max_length=10, choices=CHANNEL_CHOICES)

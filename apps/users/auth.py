@@ -27,7 +27,6 @@ class Authenticator:
 
     def generate_access_token(self, user):
         jti = uuid.uuid4()
-        logger.info(f"jti generated: {jti}")
 
         payload = {
             "jti": str(jti),
@@ -45,7 +44,6 @@ class Authenticator:
 
     def generate_refresh_token(self, user):
         jti = uuid.uuid4()
-        logger.info(f"jti generated: {jti}")
 
         payload = {
             "jti": str(jti),
@@ -54,7 +52,7 @@ class Authenticator:
             "full_name": f"{user.first_name} {user.last_name}",
             "type": "refresh",
             "iat": arrow.utcnow().datetime,
-            "exp": arrow.utcnow().shift(days=+7).datetime,
+            "exp": arrow.utcnow().shift(hours=+12).datetime,
         }
         token = jwt.encode(payload, config("SECRET_KEY"), algorithm="HS256")
         RefreshToken.objects.create(
