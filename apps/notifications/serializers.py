@@ -120,7 +120,15 @@ class CampaignListSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = fields
         
+    def get_total_recipients(self, obj):
+        return obj.notifications.count()
     
+    def get_sent_count(self, obj):
+        return obj.notifications.filter(status="sent").count()
+    
+    def get_sent_failed(Self, obj):
+        return obj.notifications.filter(status="failed").coount()
+        
     def get_created_by(self, obj):
         if not obj.created_by:
             return None

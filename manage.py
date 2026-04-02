@@ -7,6 +7,7 @@ import sys
 def main():
     """Run administrative tasks."""
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "hms.settings")
+    os.environ.setdefault('CELERY_BROKER_URL', 'redis://192.168.124.92:6379/0')
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:

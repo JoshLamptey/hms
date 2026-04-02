@@ -93,6 +93,7 @@ def _resolve_recipients(data:dict, org_slug:str)->tuple[list, str | None]:
 # ──────────────────────────────────────────────
  
 class CampaignViewSet(viewsets.ModelViewSet):
+    content_model = Campaign
     permission_classes = [CustomPermission]
     lookup_field = "uid"
     
@@ -112,7 +113,7 @@ class CampaignViewSet(viewsets.ModelViewSet):
     
     def list(self, request, *args, **kwargs):
         instance = self.get_queryset()
-        serializer = self.get_serializer(instance)
+        serializer = self.get_serializer(instance, many=True)
         return Response({
             "success" : True,
             "info" : serializer.data
@@ -129,16 +130,16 @@ class CampaignViewSet(viewsets.ModelViewSet):
     
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
-        if not serializer():
+        if not serializer.is_valid():
             return Response({
                 "success" : False,
                 "info" : serializer.errors
             },status=status.HTTP_400_BAD_REQUEST)
             
-        data = serializer.data
+        data = serializer.validated_data
         target_type = data.get("target_type")
         
-        if target_type == "contact_upload":
+        if target_type != "contact_upload":
             recipients,error = _resolve_recipients(data, request.user.org_slug)
             
             if error:
@@ -168,7 +169,7 @@ class CampaignViewSet(viewsets.ModelViewSet):
             return Response({
                 "success" : True,
                 "info" : "Campaign created successfully",
-                "data" : campaign
+                "campaign_uid" : str(campaign.uid) 
             }, status=status.HTTP_201_CREATED)
             
         except Exception as e:
@@ -273,7 +274,7 @@ class NotificationViewset(viewsets.ModelViewSet):
         POST   /notifications/mark-all-read/     — mark all notifications as read
         GET    /notifications/unread-count/      — unread count for bell badge
     """
-    
+    content_model = Notification
     permission_classes = [CustomPermission]
     lookup_field = "uid"
     
@@ -354,7 +355,7 @@ class NotificationViewset(viewsets.ModelViewSet):
     def mark_read(self, request, *args, **kwargs):
         """Mark a single notification as read."""
         instance = self.get_object()
-        instance.mark_read()
+        instance.mark_as_read()
         return Response({"success": True, "info": "Notification marked as read"}, status=status.HTTP_200_OK)
     
     @action(detail=False, methods=["post"], url_path="mark-all-read")

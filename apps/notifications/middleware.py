@@ -22,20 +22,23 @@ def get_user_from_token(token:str):
     
     try:
         payload = jwt.decode(token, config("SECRET_KEY"), algorithms=["HS256"])
-        user_uid = payload.get("user_uid") or payload.get("user_id")
         
-        if not user_uid:
-            logger.warning("JWT payload missing user_uid/user_id")
+        # Match your actual JWT payload keys
+        user_id = payload.get("user_id")
+        user_uid = payload.get("user_uid")
+
+        if user_uid:
+            user = User.objects.filter(uid=user_uid).first()
+        elif user_id:
+            user = User.objects.filter(id=user_id).first()
+        else:
+            logger.warning("JWT payload missing user_id and user_uid")
             return AnonymousUser()
-        
-        user = User.objects.filter(uid=user_uid).first() or \
-            User.objects.filter(id=user_uid).first()
-            
-            
+
         if not user:
-            logger.warning("No user found for token uid : {uid}")
+            logger.warning(f"No user found for token")
             return AnonymousUser()
-        
+
         return user
     
     except jwt.ExpiredSignatureError:
@@ -66,7 +69,7 @@ class JWTWebSocketMiddleWare(BaseMiddleware):
     """
     async def __call__(self, scope, recieve, send):
         # Parse token from query string
-        query_string = scope.get("query_string", "b").decode("utf-8")
+        query_string = scope.get("query_string", b"").decode("utf-8")
         params = parse_qs(query_string)
         token_list = params.get("token", [])
         

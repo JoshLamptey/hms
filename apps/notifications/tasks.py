@@ -1,5 +1,5 @@
 import logging
-from celery import shared_task
+from celery import shared_task, current_app
 from django.db import transaction
 from django.utils import timezone
 from datetime import timedelta
@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 @shared_task(bind=True,max_retries=3, default_retry_delay=60)
 def dispatch_campaign_task(self,campaign_id:int):
+    logger.warning(f"Celery broker: {current_app.conf.broker_url}")
     """
     Fan-out task — iterates through all pending Notification records
     for a campaign and dispatches each one via the correct channel.
