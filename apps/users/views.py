@@ -39,6 +39,7 @@ from decouple import config
 from django.contrib.auth.password_validation import validate_password
 from django.contrib.auth.hashers import check_password, make_password
 from django.core.exceptions import ValidationError
+from apps.users.pagination import FetchDataPagination
 
 auth = Authenticator()
 logger = logging.getLogger(__name__)
@@ -498,6 +499,7 @@ class UserViewset(viewsets.ModelViewSet):
     queryset = User.objects.select_related("role").all()
     permission_classes = [CustomPermission]
     lookup_field = "uid"
+    pagination_class = FetchDataPagination
     throttle_classes = [ScopedRateThrottle, UserRateThrottle]
 
     def get_serializer_class(self):
@@ -565,10 +567,7 @@ class UserViewset(viewsets.ModelViewSet):
 
             if forbidden_self_fields & set(serializer.validated_data.keys()):
                 raise PermissionDenied("You cannot modify administrative fields.")
-
-        # remove before documentation
-        logger.warning(f"Validated data keys: {list(serializer.validated_data.keys())}")
-
+       
         self.perform_update(serializer)
 
         # updated_fields = serializer.validated_data.keys()
@@ -606,6 +605,14 @@ class UserViewset(viewsets.ModelViewSet):
             raise PermissionDenied("You do not have permission to view this list.")
 
         queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return Response({
+                "success": True,
+                "info" : self.get_paginated_response(serializer.data)
+            })
+
         serializer = self.get_serializer(queryset, many=True)
 
         return Response(
@@ -776,8 +783,7 @@ class UserViewset(viewsets.ModelViewSet):
 
         try:
             validate_password(password, user=user)
-            hashed_password = make_password(password)
-            user.password = hashed_password
+            user.set_password(password)
             
         except ValidationError as e:
             return Response(
@@ -851,7 +857,6 @@ class UserViewset(viewsets.ModelViewSet):
         password = data.get("password")
         confirm_password = data.get("confirm_password")
         
-        user = request.user
         
         if not field:
             return Response(
@@ -892,21 +897,7 @@ class UserViewset(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
-
-        try:
-            validate_password(password, user=user)
-            hashed_password = make_password(password)
-            user.password = hashed_password
             
-        except ValidationError as e:
-            return Response(
-                {
-                    "success": False,
-                    "info": e.messages,
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
         
         # decode the reset token
         try:
@@ -929,10 +920,10 @@ class UserViewset(viewsets.ModelViewSet):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        phone_number = payload.get("phone_number")
+        identifier = payload.get("identifier")
 
         # verify token exists in redis and matches
-        cached_token = cache.get(f"reset_token:{phone_number}")
+        cached_token = cache.get(f"reset_token:{identifier}")
         
         if isinstance(cached_token, bytes):
             cached_token = cached_token.decode("utf-8")
@@ -943,9 +934,9 @@ class UserViewset(viewsets.ModelViewSet):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
-        # get user from phone in token
+        # get user from identifier in token
         try:
-            user = User.objects.get(phone_number=phone_number)
+            user = User.objects.filter(Q(email=identifier) | Q(phone_number=identifier)).first()
         except User.DoesNotExist:
             return Response(
                 {"success": False, "info": "User not found"},
@@ -953,30 +944,14 @@ class UserViewset(viewsets.ModelViewSet):
             )
 
         # match the field sent by frontend against the token's phone number
-        if field != str(user.phone_number or user.email):
+        if field != identifier:
             return Response(
                 {"success": False, "info": "field does not match the reset token"},
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        if not password:
-            return Response(
-                {"success": False, "info": "password is required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
 
-        if not confirm_password:
-            return Response(
-                {"success": False, "info": "confirm_password is required"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if password != confirm_password:
-            return Response(
-                {"success": False, "info": "passwords do not match"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
+        
         try:
             validate_password(password, user=user)
         except ValidationError as e:
@@ -984,14 +959,13 @@ class UserViewset(viewsets.ModelViewSet):
                 {"success": False, "info": e.messages},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        hashed_password = make_password(password)
-        user.set_password(hashed_password)
+        user.set_password(password)
         user.password_changed = True
         user.login_enabled = True
         user.save(update_fields=["password", "password_changed", "login_enabled"])
 
         # invalidate token immediately — one time use
-        cache.delete(f"reset_token:{phone_number}")
+        cache.delete(f"reset_token:{identifier}")
 
         RefreshToken.objects.filter(user=user).update(is_revoked=True)
 
@@ -1111,7 +1085,7 @@ class UserViewset(viewsets.ModelViewSet):
 
         if verify:
             user = User.objects.filter(Q(email=field) | Q(phone_number=field)).first()
-            temp_token = auth.generate_reset_token(user)
+            temp_token = auth.generate_reset_token(user, identifier=field)
             return Response(
                 {
                     "success": True,
@@ -1452,11 +1426,9 @@ class UserViewset(viewsets.ModelViewSet):
                         status=status.HTTP_400_BAD_REQUEST,
                     )
                 auth.send_otp(email=field, full_name=full_name)
-                print(f"OTP sent to email {field}")
 
             elif re.match(r"^\+?\d{7,15}$", field):
                 auth.send_otp(phone=field, full_name=full_name)
-                print(f"OTP sent to phone number {field}")
 
             else:
                 return Response(
@@ -1522,7 +1494,11 @@ class UserViewset(viewsets.ModelViewSet):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            verify = auth.verify_otp(email=field, phone=field, user_entered_otp=otp)
+            
+            if "@" in field:
+                verify = auth.verify_otp(email=field, user_entered_otp=otp)
+            else:
+                verify = auth.verify_otp(phone=field, user_entered_otp=otp)            
 
             if verify:
                 access_token = auth.generate_access_token(user)
@@ -1777,7 +1753,13 @@ class UserViewset(viewsets.ModelViewSet):
             token_obj = RefreshToken.objects.filter(
                 jti=refresh_jti, is_revoked=False
             ).first()
-
+            
+            if not token_obj:
+                return Response(
+                    {"success": False, "info": "Refresh token not found or already revoked"},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+                
             if token_obj.is_expired():
                 return Response(
                     {
@@ -1904,6 +1886,7 @@ class FetchOrgUsers(viewsets.ModelViewSet):
     content_model = User
     permission_classes = [CustomPermission]
     serializer_class = UserListSerializer
+    pagination_class = FetchDataPagination
 
     def get_queryset(self):
         return User.objects.filter(org_slug=self.request.user.org_slug).order_by("id")
@@ -1913,8 +1896,16 @@ class FetchOrgUsers(viewsets.ModelViewSet):
             users = User.objects.filter(org_slug=self.request.user.org_slug).order_by(
                 "id"
             )
+            page = self.paginate_queryset(users)
 
-            serializer = self.get_serializer(users, many=True)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return Response({
+                "success": True,
+                "info" : self.get_paginated_response(serializer.data)
+            })
+            else:
+                serializer = self.get_serializer(users, many=True)
 
             return Response(
                 {
