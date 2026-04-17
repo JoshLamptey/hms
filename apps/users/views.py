@@ -832,7 +832,7 @@ class UserViewset(viewsets.ModelViewSet):
                     if ttl > 0:
                         cache.set(f"blacklist:access:{jti}", "blacklisted", timeout=ttl)
             except Exception as e:
-                print(f"Error blacklisting access token: {str(e)}")
+                logger.error(f"Error blacklisting access token: {e}") 
                 pass
         
         return Response(
@@ -1825,11 +1825,11 @@ class UserViewset(viewsets.ModelViewSet):
                 RefreshToken.objects.filter(jti=refresh_jti).update(is_revoked=True)
 
             except jwt.InvalidTokenError:
-                print("Invalid refresh token")
+                logger.error("Invalid refresh token provided for logout.")
                 pass
 
         else:
-            print("Refresh token not provided")
+            logger.error("Refresh token not provided for logout.")
             return Response(
                 {
                     "success": False,
@@ -1900,9 +1900,10 @@ class FetchOrgUsers(viewsets.ModelViewSet):
 
             if page is not None:
                 serializer = self.get_serializer(page, many=True)
+                data =  self.get_paginated_response(serializer.data)
                 return Response({
                 "success": True,
-                "info" : self.get_paginated_response(serializer.data)
+                "info" : data   
             })
             else:
                 serializer = self.get_serializer(users, many=True)
