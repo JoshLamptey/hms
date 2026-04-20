@@ -608,9 +608,10 @@ class UserViewset(viewsets.ModelViewSet):
         page = self.paginate_queryset(queryset)
         if page is not None:
             serializer = self.get_serializer(page, many=True)
+            data = self.get_paginated_response(serializer.data).data
             return Response({
                 "success": True,
-                "info" : self.get_paginated_response(serializer.data)
+                "info" : data
             })
 
         serializer = self.get_serializer(queryset, many=True)
@@ -1900,21 +1901,11 @@ class FetchOrgUsers(viewsets.ModelViewSet):
 
             if page is not None:
                 serializer = self.get_serializer(page, many=True)
-                data =  self.get_paginated_response(serializer.data)
-                return Response({
-                "success": True,
-                "info" : data   
-            })
-            else:
-                serializer = self.get_serializer(users, many=True)
+                data = self.get_paginated_response(serializer.data).data
+                return Response({"success": True, "info": data})
 
-            return Response(
-                {
-                    "success": True,
-                    "info": serializer.data,
-                },
-                status=status.HTTP_200_OK,
-            )
+            serializer = self.get_serializer(users, many=True)
+            return Response({"success": True, "info": serializer.data}, status=status.HTTP_200_OK)
 
         except Exception as e:
             logger.error(f"Error fetching org users: {str(e)}", exc_info=True)
