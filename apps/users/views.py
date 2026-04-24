@@ -518,11 +518,33 @@ class UserViewset(viewsets.ModelViewSet):
 
     def get_queryset(self):
         user = self.request.user
+        queryset = User.objects.select_related("role", "tenant").all()
 
-        if user.role.name == "SUPER_ADMIN":
-            return self.queryset
+        # Scope by org for non-super-admins
+        if user.role.name != "SUPER_ADMIN":
+            queryset = queryset.filter(tenant__org_slug=user.org_slug)
 
-        return self.queryset.filter(tenant__org_slug=user.org_slug)
+        # Optional filters from query params
+        tenant = self.request.query_params.get("tenant")
+        role = self.request.query_params.get("role")
+        user_status = self.request.query_params.get("status")
+        name = self.request.query_params.get("name")# avoid shadowing `status` module
+
+        if tenant and user.role.name == "SUPER_ADMIN":  # only super_admin can filter across orgs
+            queryset = queryset.filter(tenant__org_slug=tenant)
+        if role:
+            queryset = queryset.filter(role__name__iexact=role)
+        if user_status:
+            queryset = queryset.filter(status__iexact=user_status)
+        if name:
+                queryset = queryset.filter(
+                    Q(first_name__icontains=name) |
+                    Q(last_name__icontains=name) |
+                    Q(middle_name__icontains=name)
+                )
+
+        return queryset
+    
 
     def check_throttles(self, request):
         method = getattr(self, self.action)
@@ -603,16 +625,24 @@ class UserViewset(viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         if request.user.role.name not in ["SUPER_ADMIN"]:
             raise PermissionDenied("You do not have permission to view this list.")
-
+        
+        
         queryset = self.filter_queryset(self.get_queryset())
+        
+        
         page = self.paginate_queryset(queryset)
         if page is not None:
             serializer = self.get_serializer(page, many=True)
             data = self.get_paginated_response(serializer.data).data
             return Response({
                 "success": True,
-                "info" : data
-            })
+                "info": data["results"],
+                "meta": {
+                "count": data["count"],
+                "next": data["next"],
+                "previous": data["previous"],
+        }
+            }, status=status.HTTP_200_OK)
 
         serializer = self.get_serializer(queryset, many=True)
 
@@ -623,8 +653,6 @@ class UserViewset(viewsets.ModelViewSet):
             },
             status=status.HTTP_200_OK,
         )
-
-
 
     def create(self, request, *args, **kwargs):
         try:
@@ -1894,15 +1922,39 @@ class FetchOrgUsers(viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         try:
+            role = request.query_params.get("role")
+            user_status=request.query_params.get("status")
+            name = request.query_params.get("name")
+            
             users = User.objects.filter(org_slug=self.request.user.org_slug).order_by(
                 "id"
             )
+            
+            if role:
+                users = users.filter(role__name=role)
+            if user_status:
+                users = users.filter(status=user_status)
+            if name:
+                users =users.filter(
+                    Q(first_name__icontains=name) |
+                    Q(last_name__icontains=name) |
+                    Q(middle_name__icontains=name) 
+                )
             page = self.paginate_queryset(users)
 
             if page is not None:
                 serializer = self.get_serializer(page, many=True)
                 data = self.get_paginated_response(serializer.data).data
-                return Response({"success": True, "info": data})
+                
+                return Response({
+                    "success": True,
+                    "info": data["results"],
+                    "meta": {
+                        "count": data["count"],
+                        "next": data["next"],
+                        "previous": data["previous"],
+                    }
+                }, status=status.HTTP_200_OK)
 
             serializer = self.get_serializer(users, many=True)
             return Response({"success": True, "info": serializer.data}, status=status.HTTP_200_OK)
