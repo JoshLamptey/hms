@@ -1,5 +1,5 @@
 from rest_framework.permissions import BasePermission
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, NotAuthenticated
 from django.contrib.auth.models import Permission
 from apps.users.models import UserRole, UserGroup
 from django.contrib.contenttypes.models import ContentType
@@ -31,7 +31,7 @@ class CustomPermission(BasePermission):
         user = request.user
 
         if not user or not user.is_authenticated:
-            return False
+            raise NotAuthenticated("Authentication credentials were not provided.")
 
         if user.is_blocked:
             raise PermissionDenied(

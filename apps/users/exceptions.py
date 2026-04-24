@@ -1,6 +1,6 @@
 from rest_framework.views import exception_handler
 from rest_framework.response import Response
-from rest_framework.exceptions import Throttled
+from rest_framework.exceptions import Throttled, NotAuthenticated, AuthenticationFailed
 from apps.client.models import UserRateLimitFlag
 from django.utils import timezone
 
@@ -9,7 +9,13 @@ from django.utils import timezone
 
 def custom_exception_handler(exc, context):
     request = context.get("request", None)
-
+    
+    if isinstance(exc, (NotAuthenticated, AuthenticationFailed)):
+        return Response(
+            {"success": False, "info": str(exc.detail)},
+            status=401
+        )
+        
     if isinstance(exc, Throttled):
         user = getattr(request, "user", None)
         if user and user.is_authenticated:
