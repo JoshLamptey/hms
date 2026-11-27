@@ -110,6 +110,19 @@ def schema_check():
     python("manage.py", "makemigrations", "--check", "--dry-run")
 
 
+def test():
+    import django
+    from django.test.runner import DiscoverRunner
+
+    django.setup()
+    runner = DiscoverRunner(verbosity=2)
+    labels = ["apps"]
+    if runner.build_suite(labels).countTestCases() == 0:
+        raise ValueError("No application tests discovered")
+    if runner.run_tests(labels):
+        raise ValueError("Application tests failed")
+
+
 def env_check():
     import django
     from django.conf import settings
@@ -154,7 +167,7 @@ def docker_proof():
     run("docker", "run", "--rm", "--entrypoint", "/bin/sh", image, "-ec", 'test -x "$1"', "startup-proof", config["Cmd"][0])
     for command, argument in (("daphne", "--help"), ("celery", "--version"), ("python", "--version")):
         run("docker", "run", "--rm", "--entrypoint", command, image, argument)
-    run("docker", "run", "--rm", "--entrypoint", "/bin/sh", image, "-ec", "test -f /app/manage.py && test -f /app/apps/client/management/commands/migrate_schemas.py")
+    run("docker", "run", "--rm", "--entrypoint", "/bin/sh", image, "-ec", "test -f /app/manage.py && test -f /app/apps/clients/management/commands/migrate_schemas.py")
 
 
 def main():
@@ -162,6 +175,7 @@ def main():
         "bootstrap": bootstrap,
         "lockfile-check": lockfile_check,
         "lint": lint,
+        "test": test,
         "schema-check": schema_check,
         "env-check": env_check,
         "security": security,

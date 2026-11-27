@@ -1,86 +1,89 @@
 import logging
-import jwt
 from urllib.parse import parse_qs
-from channels.middleware import BaseMiddleware
-from channels.db import database_sync_to_async
-from django.contrib.auth.models import AnonymousUser
-from decouple import config
 
+from channels.db import database_sync_to_async
+from channels.middleware import BaseMiddleware
+from django.conf import settings
+from django.contrib.auth import get_user_model
+from django.contrib.auth.models import AnonymousUser
+
+from apps.notifications.tickets import consume_ticket
 
 logger = logging.getLogger(__name__)
 
+
 @database_sync_to_async
-def get_user_from_token(token:str):
-    """
-    Validates the JWT token and returns the corresponding User.
-    Returns AnonymousUser if the token is invalid or the user doesn't exist.
- 
-    We reuse the same SECRET_KEY and algorithm as your existing JWTAuthentication
-    so the frontend can use the same access token for both HTTP and WebSocket.
-    """
-    from apps.users.models import User
-    
+def _consume_ticket(ticket):
+    return consume_ticket(ticket)
+
+
+@database_sync_to_async
+def _load_user(user_id, tenant_id):
+    User = get_user_model()
     try:
-        payload = jwt.decode(token, config("SECRET_KEY"), algorithms=["HS256"])
-        
-        # Match your actual JWT payload keys
-        user_id = payload.get("user_id")
-        user_uid = payload.get("user_uid")
+        user = User.objects.select_related("tenant").get(
+            pk=user_id,
+            tenant_id=tenant_id,
+        )
+    except User.DoesNotExist:
+        return None
 
-        if user_uid:
-            user = User.objects.filter(uid=user_uid).first()
-        elif user_id:
-            user = User.objects.filter(id=user_id).first()
+    if (
+        not user.is_active
+        or user.is_blocked
+        or not user.login_enabled
+        or user.status != User.Status.ACTIVE
+        or (user.tenant_id is not None and not user.tenant.is_active)
+    ):
+        return None
+    return user
+
+
+class TicketAuthMiddleware(BaseMiddleware):
+    async def __call__(self, scope, receive, send):
+        scope = dict(scope)
+        scope["user"] = AnonymousUser()
+        scope["ticket_auth_failed"] = True
+        scope["ticket_close_code"] = 4401
+
+        query = parse_qs(scope.get("query_string", b"").decode())
+        ticket_values = query.get("ticket", [])
+        if "token" in query or len(ticket_values) != 1:
+            logger.warning("WebSocket ticket rejected: missing or invalid ticket parameter.")
+            return await super().__call__(scope, receive, send)
+
+        headers = dict(scope.get("headers", []))
+        origin = headers.get(b"origin", b"").decode()
+        allowed_origins = getattr(settings, "WS_ALLOWED_ORIGINS", [])
+        if origin and origin not in allowed_origins:
+            logger.warning("WebSocket ticket rejected: origin not allowed.")
+            scope["ticket_close_code"] = 4403
+            return await super().__call__(scope, receive, send)
+
+        try:
+            claims = await _consume_ticket(ticket_values[0])
+        except Exception:
+            logger.exception("WebSocket ticket store unavailable.")
+            scope["ticket_close_code"] = 4500
+            return await super().__call__(scope, receive, send)
+
+        if not claims:
+            logger.warning("WebSocket ticket rejected: expired or already consumed.")
+        elif origin != claims.get("origin"):
+            logger.warning("WebSocket ticket rejected: origin mismatch.")
+            scope["ticket_close_code"] = 4403
         else:
-            logger.warning("JWT payload missing user_id and user_uid")
-            return AnonymousUser()
+            try:
+                user = await _load_user(claims["user_id"], claims["tenant_id"])
+            except Exception:
+                logger.exception("WebSocket ticket user lookup failed.")
+                scope["ticket_close_code"] = 4500
+            else:
+                if user:
+                    scope["user"] = user
+                    scope["tenant_id"] = user.tenant_id
+                    scope["ticket_auth_failed"] = False
+                else:
+                    logger.warning("WebSocket ticket rejected: user is unavailable.")
 
-        if not user:
-            logger.warning(f"No user found for token")
-            return AnonymousUser()
-
-        return user
-    
-    except jwt.ExpiredSignatureError:
-        logger.warning("Websocket JWT token has expired")
-        return AnonymousUser()
-    except jwt.InvalidTokenError as e:
-        logger.warning(f"Websocket JWT token invalid : {e}")
-        return AnonymousUser()
-    
-    except Exception as e:
-        logger.error(f"Unexpected error in websocket auth : {e}")
-        return AnonymousUser()
-    
-
-class JWTWebSocketMiddleWare(BaseMiddleware):
-    """
-    Authenticates WebSocket connections using a JWT token.
- 
-    The frontend passes the token in the query string:
-        ws://yourhost/ws/notifications/?token=<access_token>
- 
-    This runs before the consumer so that by the time the consumer's
-    connect() method is called, self.scope["user"] is already populated.
- 
-    Why query string and not headers?
-    Browser WebSocket API doesn't support custom headers — query string
-    is the standard workaround for WebSocket JWT auth.
-    """
-    async def __call__(self, scope, recieve, send):
-        # Parse token from query string
-        query_string = scope.get("query_string", b"").decode("utf-8")
-        params = parse_qs(query_string)
-        token_list = params.get("token", [])
-        
-        if token_list:
-            token = token_list[0]
-            scope["user"] = await get_user_from_token(token)
-            
-        else :
-            logger.warning("Websocket connection attempted with no token")
-            scope["user"] = AnonymousUser()
-            
-        return await super().__call__(scope, recieve, send)
-    
-    
+        return await super().__call__(scope, receive, send)

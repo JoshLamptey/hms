@@ -3,7 +3,6 @@ from apps.notifications import consumers
 
 websocket_urlpatterns = [
     # ws://yourhost/ws/notifications/
-    # The consumer handles auth via the JWTWebSocketMiddleware —
-    # by the time the connection reaches here, request.user is already set.
+    # The ASGI middleware authenticates a short-lived, one-time ticket.
     re_path(r"^ws/notifications/$", consumers.NotificationConsumer.as_asgi()),
 ]

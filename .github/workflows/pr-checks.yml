@@ -52,6 +52,9 @@ jobs:
         run: sh ci/run env-check
       - name: Migration integrity
         run: sh ci/run schema-check
+      # The ERP reference keeps application tests out of the required PR gate.
+      # - name: Application tests
+      #   run: sh ci/run test
       - name: Security checks
         run: sh ci/run security
 

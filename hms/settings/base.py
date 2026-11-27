@@ -36,9 +36,24 @@ INSTALLED_APPS = [
     "django_celery_beat",
     "channels",
     "apps.users",
-    "apps.client",
+    "apps.clients",
     "apps.notifications",
 ]
+
+SHARED_APP_LABELS = [
+    "contenttypes",
+    "auth",
+    "sessions",
+    "admin",
+    "users",
+    "clients",
+    "notifications",
+    "django_celery_results",
+    "django_celery_beat",
+    "post_office",
+]
+TENANT_APP_LABELS = []
+SILENCED_SYSTEM_CHECKS = ["migrations.W001"]
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
@@ -77,8 +92,6 @@ DATABASES = {"default": {
     "HOST": config("POSTGRES_HOST", default="localhost"),
     "PORT": config("POSTGRES_PORT", default="5432"),
 }}
-DATABASE_ROUTERS = ["apps.client.routers.TenantRouter"]
-
 REDIS_HOST = config("REDIS_HOST", default="redis://127.0.0.1:6379/0")
 CACHES = {"default": {
     "BACKEND": "django.core.cache.backends.redis.RedisCache",
@@ -100,6 +113,8 @@ REST_FRAMEWORK = {
     ],
     "DEFAULT_THROTTLE_RATES": {
         "user": "100/min",
+        "ws_ticket": "10/min",
+        "ws_ticket_ip": "30/min",
         "login": "3/min",
         "passwordless_login": "3/min",
         "forgot_password": "3/min",
@@ -120,7 +135,6 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator", "OPTIONS": {"min_length": 8}},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
-    {"NAME": "apps.users.validators.AlphaNumericSymbolValidator"},
 ]
 
 LANGUAGE_CODE = "en-us"
@@ -183,8 +197,16 @@ PERMISSIONS_POLICY = {
 }
 
 CELERY_BEAT_SCHEDULE = {
+    "send-license-expiry-notices": {
+        "task": "apps.notifications.tasks.send_license_expiry_notices",
+        "schedule": crontab(hour=8, minute=0),
+    },
     "retry-failed-notifications": {
         "task": "apps.notifications.tasks.retry_failed_notifications",
         "schedule": crontab(minute=0),
+    },
+    "send-scheduled-campaigns": {
+        "task": "apps.notifications.tasks.send_scheduled_campaigns",
+        "schedule": crontab(minute="*/5"),
     },
 }

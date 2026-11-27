@@ -33,7 +33,7 @@ urlpatterns = [
     path("health/live/", live, name="health-live"),
     path("health/ready/", ready, name="health-ready"),
     path("", include("apps.notifications.urls")),
-    path("", include("apps.client.urls")),
+    path("", include("apps.clients.urls")),
     path("auth/", include("apps.users.urls")),
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path(
