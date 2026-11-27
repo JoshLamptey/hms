@@ -1,0 +1,84 @@
+x-app-base: &app-base
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 30s
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+  networks: [internal]
+
+x-app-prod: &app-prod
+  <<: *app-base
+  image: ${APP_IMAGE:?APP_IMAGE must be an immutable registry image reference}
+  env_file:
+    - ${APP_ENV_FILE:-../../.docker.env}
+  environment:
+    DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-hms.settings.prod}
+    APP_HOST: ${APP_HOST:-0.0.0.0}
+    APP_PORT: ${APP_PORT:-8000}
+  read_only: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+    - /app/tmp:rw,noexec,nosuid,size=64m
+
+services:
+  web:
+    <<: *app-prod
+    command: ["/bin/sh", "-c", "exec daphne -b \"$${APP_HOST:-0.0.0.0}\" -p \"$${APP_PORT:-8000}\" hms.asgi:application"]
+    ports: ["127.0.0.1:${APP_HOST_PORT:-8000}:8000"]
+    volumes:
+      - static-data:/app/staticfiles:ro
+      - media-data:/app/media
+      - runtime-data:/app/runtime
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  worker:
+    <<: *app-prod
+    command: ["/bin/sh", "-c", "exec celery -A hms worker -l \"$${CELERY_LOG_LEVEL:-info}\" --concurrency=\"$${CELERY_CONCURRENCY:-4}\""]
+    volumes: [media-data:/app/media, runtime-data:/app/runtime]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  beat:
+    <<: *app-prod
+    command: ["/bin/sh", "-c", "exec celery -A hms beat -l \"$${CELERY_LOG_LEVEL:-info}\" --scheduler django_celery_beat.schedulers:DatabaseScheduler --schedule \"$${CELERY_BEAT_SCHEDULE_FILE:-/app/runtime/celerybeat-schedule}\""]
+    volumes: [runtime-data:/app/runtime]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
+
+  migrate:
+    <<: *app-prod
+    profiles: [jobs]
+    restart: "no"
+    command: ["/bin/sh", "-c", "python manage.py migrate --noinput && exec python manage.py migrate_schemas"]
+
+  collectstatic:
+    <<: *app-prod
+    profiles: [jobs]
+    restart: "no"
+    command: ["python", "manage.py", "collectstatic", "--noinput"]
+    volumes: [static-data:/app/staticfiles]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+volumes:
+  static-data:
+  media-data:
+  runtime-data:
+
+networks:
+  internal:

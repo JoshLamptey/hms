@@ -1,0 +1,246 @@
+name: 3. Promote & Deploy Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full 40-character develop commit approved from staging
+        required: true
+        type: string
+      release_version:
+        description: Optional release tag, for example v1.8.2
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hms-production
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/hms
+
+jobs:
+  preflight:
+    name: Verify staged production candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      candidate_sha: ${{ steps.facts.outputs.candidate_sha }}
+      image: ${{ steps.facts.outputs.image }}
+      app_digest: ${{ steps.facts.outputs.app_digest }}
+      release_version: ${{ steps.facts.outputs.release_version }}
+    steps:
+      - name: Check out develop history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+
+      - name: Verify candidate, staging alias, and signature
+        id: facts
+        env:
+          CANDIDATE_SHA_INPUT: ${{ inputs.candidate_sha }}
+          RELEASE_VERSION: ${{ inputs.release_version }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_sha="${CANDIDATE_SHA_INPUT,,}"
+          [[ "$candidate_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::candidate_sha must be a full 40-character SHA."; exit 1; }
+          git fetch --no-tags origin develop
+          git cat-file -e "$candidate_sha^{commit}"
+          git merge-base --is-ancestor "$candidate_sha" origin/develop || { echo "::error::Candidate is not contained in develop."; exit 1; }
+
+          app_digest="$(docker buildx imagetools inspect "$IMAGE:sha-$candidate_sha" --format '{{.Manifest.Digest}}')"
+          staging_digest="$(docker buildx imagetools inspect "$IMAGE:staging" --format '{{.Manifest.Digest}}')"
+          [[ "$app_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$app_digest" == "$staging_digest" ]] || { echo "::error::Staging does not point to this candidate."; exit 1; }
+
+          cosign verify \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/staging.yml@refs/heads/develop" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "$IMAGE@$app_digest" >/dev/null
+
+          release_version="$RELEASE_VERSION"
+          if [[ -n "$release_version" && ! "$release_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::release_version must look like v1.8.2 (optional prerelease/build suffix allowed)."
+            exit 1
+          fi
+          {
+            echo "candidate_sha=$candidate_sha"
+            echo "image=$IMAGE"
+            echo "app_digest=$app_digest"
+            echo "release_version=$release_version"
+          } >> "$GITHUB_OUTPUT"
+
+  deploy-production:
+    name: Deploy exact image to production
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    environment: production
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
+        env:
+          APP_IMAGE_REF: ${{ needs.preflight.outputs.image }}@${{ needs.preflight.outputs.app_digest }}
+          DEPLOY_SHA: ${{ needs.preflight.outputs.candidate_sha }}
+          DEPLOY_PATH: ${{ secrets.PRODUCTION_APP_DIR }}
+          DJANGO_SETTINGS_MODULE: hms.settings.prod
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          host: ${{ secrets.PRODUCTION_HOST }}
+          username: ${{ secrets.PRODUCTION_USER }}
+          key: ${{ secrets.PRODUCTION_SSH_KEY }}
+          envs: APP_IMAGE_REF,DEPLOY_SHA,DEPLOY_PATH,DJANGO_SETTINGS_MODULE,GHCR_USERNAME,GHCR_TOKEN
+          script: |
+            set -eu
+            : "${DEPLOY_PATH:?PRODUCTION_APP_DIR is required}"
+            : "${APP_IMAGE_REF:?image digest is required}"
+            cd "$DEPLOY_PATH"
+
+            ENV_FILE=.docker.env
+            COMPOSE_FILE=infra/compose/compose.prod.yml
+            test -f "$ENV_FILE"
+            test -f "$COMPOSE_FILE"
+
+            DOCKER_CONFIG="$(mktemp -d)"
+            export DOCKER_CONFIG
+            ENV_BACKUP="$(mktemp)"
+            cp -p "$ENV_FILE" "$ENV_BACKUP"
+            PREVIOUS_SHA="$(git rev-parse HEAD)"
+            PREVIOUS_IMAGE="$(awk -F= '$1 == "APP_IMAGE" { value=substr($0, index($0, "=") + 1) } END { print value }' "$ENV_FILE")"
+            case "$PREVIOUS_IMAGE" in *@sha256:*) ;; *) PREVIOUS_IMAGE="" ;; esac
+            DEPLOY_IMAGE="$APP_IMAGE_REF"
+
+            compose() {
+              APP_IMAGE="$DEPLOY_IMAGE" DJANGO_SETTINGS_MODULE="$DJANGO_SETTINGS_MODULE" docker --config "$DOCKER_CONFIG" compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+            }
+
+            cleanup() {
+              status=$?
+              trap - EXIT
+              if [ "$status" -ne 0 ]; then
+                echo "Production rollout failed; restoring the previous configuration." >&2
+                compose ps --all || true
+                compose logs --tail=150 || true
+                cp -p "$ENV_BACKUP" "$ENV_FILE" || true
+                git checkout --detach "$PREVIOUS_SHA" || true
+                if [ -n "$PREVIOUS_IMAGE" ]; then
+                  DEPLOY_IMAGE="$PREVIOUS_IMAGE"
+                  compose up -d --remove-orphans --pull never || true
+                fi
+              fi
+              rm -f "$ENV_BACKUP"
+              rm -rf "$DOCKER_CONFIG"
+              exit "$status"
+            }
+            trap cleanup EXIT
+
+            git fetch --no-tags origin "$DEPLOY_SHA"
+            git checkout --detach "$DEPLOY_SHA"
+            compose config --quiet
+            printf '%s' "$GHCR_TOKEN" | docker --config "$DOCKER_CONFIG" login ghcr.io --username "$GHCR_USERNAME" --password-stdin
+            docker --config "$DOCKER_CONFIG" pull "$APP_IMAGE_REF"
+            compose --profile jobs run --rm --pull never migrate
+            compose --profile jobs run --rm --pull never --no-deps collectstatic
+
+            tmp_file="$(mktemp)"
+            awk -v image="$APP_IMAGE_REF" 'BEGIN { updated=0 } /^APP_IMAGE=/ { if (!updated) print "APP_IMAGE=" image; updated=1; next } { print } END { if (!updated) print "APP_IMAGE=" image }' "$ENV_FILE" > "$tmp_file"
+            chmod 600 "$tmp_file"
+            mv "$tmp_file" "$ENV_FILE"
+            compose up -d --remove-orphans --pull never
+
+            APP_HOST_PORT="$(awk -F= '$1 == "APP_HOST_PORT" { value=substr($0, index($0, "=") + 1) } END { print value }' "$ENV_FILE")"
+            APP_HOST_PORT="${APP_HOST_PORT:-8000}"
+            case "$APP_HOST_PORT" in *[!0-9]*|'') echo "APP_HOST_PORT must be numeric." >&2; exit 1 ;; esac
+            curl --fail --silent --show-error --retry 12 --retry-delay 5 --retry-all-errors "http://127.0.0.1:${APP_HOST_PORT}/health/live"
+
+      - name: Check external production readiness
+        env:
+          PRODUCTION_BASE_URL: ${{ vars.PRODUCTION_BASE_URL }}
+        run: |
+          set -euo pipefail
+          : "${PRODUCTION_BASE_URL:?PRODUCTION_BASE_URL environment variable is required}"
+          curl --fail --silent --show-error --retry 5 --retry-delay 5 --retry-all-errors "${PRODUCTION_BASE_URL%/}/health/ready"
+
+  promote:
+    name: Promote deployed digest and record release
+    needs: [preflight, deploy-production]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+      deployments: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Move production aliases to deployed digest
+        env:
+          IMAGE: ${{ needs.preflight.outputs.image }}
+          APP_DIGEST: ${{ needs.preflight.outputs.app_digest }}
+          RELEASE_VERSION: ${{ needs.preflight.outputs.release_version }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --prefer-index=false --tag "$IMAGE:production" "$IMAGE@$APP_DIGEST"
+          if [[ -n "$RELEASE_VERSION" ]]; then
+            docker buildx imagetools create --prefer-index=false --tag "$IMAGE:$RELEASE_VERSION" "$IMAGE@$APP_DIGEST"
+          fi
+          actual_digest="$(docker buildx imagetools inspect "$IMAGE:production" --format '{{.Manifest.Digest}}')"
+          test "$actual_digest" = "$APP_DIGEST"
+
+      - name: Record successful GitHub deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
+          IMAGE: ${{ needs.preflight.outputs.image }}
+          APP_DIGEST: ${{ needs.preflight.outputs.app_digest }}
+        run: |
+          set -euo pipefail
+          deployment_id="$(gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments" \
+            -f ref="$CANDIDATE_SHA" \
+            -f environment=production \
+            -F auto_merge=false \
+            -f description="HMS backend production deployment" \
+            --jq '.id')"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/deployments/${deployment_id}/statuses" \
+            -f state=success \
+            -f environment=production \
+            -f description="Deployed $IMAGE@$APP_DIGEST" >/dev/null
+          {
+            echo "## Production deployment"
+            echo
+            echo "- Commit: `$CANDIDATE_SHA`"
+            echo "- Image: `$IMAGE@$APP_DIGEST`"
+            echo "- Deployment ID: `$deployment_id`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -11,9 +11,9 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             "schema_names",
-            nargs="+",
+            nargs="*",
             type=str,
-            help="Migrate specific schemas (default: all non-system schemas)",
+            help="Migrate specific schemas (default: all registered tenant schemas)",
         )
         parser.add_argument(
             "--fake",

@@ -1,0 +1,121 @@
+x-app-base: &app-base
+  restart: unless-stopped
+  init: true
+  stop_grace_period: 30s
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+  networks: [internal]
+
+x-dev-app: &dev-app
+  <<: *app-base
+  image: ${APP_IMAGE:-hms:development}
+  env_file:
+    - ../../.env
+  environment:
+    DJANGO_SETTINGS_MODULE: ${DJANGO_SETTINGS_MODULE:-hms.settings.dev}
+    APP_HOST: ${APP_HOST:-0.0.0.0}
+    APP_PORT: ${APP_PORT:-8000}
+    POSTGRES_ENGINE: ${POSTGRES_ENGINE:-django.db.backends.postgresql}
+    POSTGRES_HOST: db
+    POSTGRES_PORT: "5432"
+    POSTGRES_DB: ${POSTGRES_DB:-hms_db}
+    POSTGRES_USER: ${POSTGRES_USER:-postgres}
+    POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    REDIS_HOST: redis://redis:6379/0
+    CELERY_BROKER_URL: redis://redis:6379/0
+    CELERY_RESULT_BACKEND: redis://redis:6379/0
+    CELERY_TIME_ZONE: ${CELERY_TIME_ZONE:-Africa/Accra}
+    CELERY_CONCURRENCY: ${CELERY_CONCURRENCY:-2}
+    CELERY_LOG_LEVEL: ${CELERY_LOG_LEVEL:-info}
+
+services:
+  web:
+    <<: *dev-app
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile
+      target: development
+    ports: ["127.0.0.1:${APP_HOST_PORT:-8000}:8000"]
+    volumes:
+      - ../..:/app:cached
+      - static-data:/app/staticfiles
+      - media-data:/app/media
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  worker:
+    <<: *dev-app
+    command: ["/bin/sh", "-c", "exec celery -A hms worker -l \"$${CELERY_LOG_LEVEL:-info}\" --concurrency=\"$${CELERY_CONCURRENCY:-2}\""]
+    volumes: ["../..:/app:cached", "media-data:/app/media"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  beat:
+    <<: *dev-app
+    command: ["/bin/sh", "-c", "exec celery -A hms beat -l \"$${CELERY_LOG_LEVEL:-info}\" --scheduler django_celery_beat.schedulers:DatabaseScheduler --schedule \"$${CELERY_BEAT_SCHEDULE_FILE:-/app/runtime/celerybeat-schedule}\""]
+    volumes: ["../..:/app:cached"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  migrate:
+    <<: *dev-app
+    profiles: [jobs]
+    restart: "no"
+    command: ["/bin/sh", "-c", "python manage.py migrate --noinput && exec python manage.py migrate_schemas"]
+    depends_on:
+      db: {condition: service_healthy}
+
+  collectstatic:
+    <<: *dev-app
+    profiles: [jobs]
+    restart: "no"
+    command: ["python", "manage.py", "collectstatic", "--noinput"]
+    volumes: ["../..:/app:cached", "static-data:/app/staticfiles"]
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+
+  db:
+    image: ${POSTGRES_IMAGE:-postgres:16.4-alpine}
+    restart: unless-stopped
+    init: true
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hms_db}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+    volumes: [db-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-postgres} -d $${POSTGRES_DB:-hms_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  redis:
+    image: ${REDIS_IMAGE:-redis:7.4-alpine}
+    restart: unless-stopped
+    init: true
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [internal]
+
+volumes:
+  db-data:
+  redis-data:
+  static-data:
+  media-data:
+
+networks:
+  internal:

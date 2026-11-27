@@ -16,6 +16,7 @@ Including another URLconf
 """
 
 from django.contrib import admin
+from hms.health import live, ready
 from django.urls import path, include
 from drf_spectacular.views import (
     SpectacularAPIView,
@@ -29,6 +30,8 @@ from django.conf.urls.static import static
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    path("health/live/", live, name="health-live"),
+    path("health/ready/", ready, name="health-ready"),
     path("", include("apps.notifications.urls")),
     path("", include("apps.client.urls")),
     path("auth/", include("apps.users.urls")),

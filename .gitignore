@@ -7,3 +7,8 @@ debug.log
 venv
 .venv
 .env
+.docker.env
+staticfiles/
+runtime/
+ci.sqlite3
+pyrightconfig.json

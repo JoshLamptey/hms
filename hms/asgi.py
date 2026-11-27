@@ -12,7 +12,7 @@ import os
 from django.core.asgi import get_asgi_application
 from channels.routing import ProtocolTypeRouter,URLRouter
 
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "hms.settings")
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "hms.settings.dev")
 
 # Initialize Django ASGI application early to ensure apps are loaded
 # before importing consumers or routing modules.
