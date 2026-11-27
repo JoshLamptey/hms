@@ -1,145 +1,78 @@
 import json
 import logging
-from channels.generic.websocket import AsyncJsonWebsocketConsumer
-from django.contrib.auth.models import AnonymousUser
-
+from channels.generic.websocket import AsyncWebsocketConsumer
+from channels.db import database_sync_to_async
+from apps.notifications.realtime import notification_group_name
 
 logger = logging.getLogger(__name__)
 
-class NotificationConsumer(AsyncJsonWebsocketConsumer):
-    """
-    WebSocket consumer for real-time in-app notifications.
- 
-    Flow:
-        1. Client connects to ws://host/ws/notifications/?token=<jwt>
-        2. JWTWebSocketMiddleware authenticates and sets scope["user"]
-        3. Consumer joins the user's personal group: notify_<user_id>
-        4. When a notification is created, the service calls
-           channel_layer.group_send() to this group
-        5. Consumer receives it and forwards to the client over WebSocket
- 
-    Each user has their own isolated group so pushes are always targeted.
-    """
-    
+
+class NotificationConsumer(AsyncWebsocketConsumer):
+
     async def connect(self):
-        user = self.scope.get("user")
-        
-        # Reject unauthenticated connections immediately
-        if not user or isinstance(user, AnonymousUser):
-            logger.warning("Rejected unauthenticated websocket connection")
+        if self.scope.get("ticket_auth_failed"):
+            await self.accept()
+            await self.close(code=self.scope.get("ticket_close_code", 4401))
+            return
+
+        self.user = self.scope.get("user")
+
+        if not self.user or not self.user.is_authenticated:
             await self.close(code=4001)
             return
-        
-        # Each user gets their own group keyed by their integer PK
-        # Using user.id (integer) rather than uid (UUID) keeps group names short
-        
-        self.group_name = f"notify_{user.id}"
-        self.user = user
-        
-        
-        # Join the group — this is what allows group_send() to reach this consumer
+
+        self.group_name = notification_group_name(
+            self.user.tenant_id,
+            self.user.id,
+        )
+
         await self.channel_layer.group_add(
             self.group_name,
-            self.channel_name
+            self.channel_name,
         )
-        
+
         await self.accept()
-        
-        logger.info(f"Websocket connected: user={user.id} group={self.group_name}")
-        
-        # Send a confirmation so the client knows it's live
-        await self.send(text_data=json.dumps({
-            "type" : "connection.established",
-            "message" : "Connected to notification stream"
-        }))
-        
-    
+        logger.info(f"WebSocket connected: user {self.user.id}")
+
     async def disconnect(self, close_code):
-        # Leave the group on disconnect so stale channels don't pile up
-        if hasattr (self, "group_name"):
+        if hasattr(self, "group_name"):
             await self.channel_layer.group_discard(
                 self.group_name,
-                self.channel_name
+                self.channel_name,
             )
-            logger.info(
-                f"Websocket disconnected : user={self.user.id}"
-                f"group={self.group_name} code={close_code}"
-            )
-            
-    async def recieve(self, text_data=None, bytes_data=None):
-        """
-        Handle messages sent FROM the client TO the server.
- 
-        Currently supports:
-            - mark_read: mark a specific notification as read
-            - ping: keepalive check
- 
-        The client sends JSON: {"type": "mark_read", "uid": "<notification_uid>"}
-        """
-        if not text_data:
-            return
-        
+        logger.info(f"WebSocket disconnected: code {close_code}")
+
+    async def receive(self, text_data):
         try:
             data = json.loads(text_data)
-            message_type= data.get("type")
-            
-            if message_type == "ping":
-                await self.send(text_data=json.dumps({"type" : "pong"}))
-                
-            elif message_type == "mark_read":
-                uid = data.get("uid")
-                if uid:
-                    await self._mark_notification_read(uid)
-                
-            else :
-                logger.warning(f"Unknown websocket message type: {message_type}")
-        
+            action = data.get("action")
+
+            if action == "mark_read":
+                notification_id = data.get("notification_id")
+                if notification_id:
+                    await self.mark_notification_read(notification_id)
+
+            elif action == "ping":
+                await self.send(text_data=json.dumps({"type": "pong"}))
+
         except json.JSONDecodeError:
-            logger.warning("Recieved invalid JSON over websocket")
-            
-    
-    
-    # ──────────────────────────────────────────────
-    # GROUP MESSAGE HANDLERS
-    # These methods are called when channel_layer.group_send()
-    # is used from the service/tasks. The "type" field in the
-    # group_send payload maps to the method name (dots → underscores).
-    # ──────────────────────────────────────────────
-    
-    
-    async def send_notification(self, event):
-        """
-        Receives a notification from the channel layer and forwards it
-        to the connected WebSocket client.
- 
-        Called when type="send_notification" is used in group_send().
-        The "data" key contains the payload the client receives.
-        """
-        
-        await self.send(text_data=json.dumps({
-            "type" : "notification.new",
-            "data" : event["data"]
-        }))
-        
-    # ──────────────────────────────────────────────
-    # PRIVATE HELPERS
-    # ──────────────────────────────────────────────
-    
-    @staticmethod
-    async def _mark_notification_read(uid:str):
-        """
-        Marks a notification as read when the client sends a mark_read event.
-        Runs the DB update in a thread pool since Django ORM is synchronous.
-        """
-        from channels.db import database_sync_to_async
-        from apps.notifications.models import Notification
-        
-        @database_sync_to_async
-        def _update(uid):
-            Notification.objects.filter(uid=uid).update(
-                is_read=True,
-                status = "read"
-            )
-            
-        await _update(uid)
-        logger.info(f"Notification {uid} marked as read via Websocket")
+            logger.warning(f"Invalid JSON received from user {self.user.id}")
+        except Exception as e:
+            logger.error(f"WebSocket receive error: {e}")
+
+    async def notification_message(self, event):
+        await self.send(text_data=json.dumps(event["message"]))
+
+    @database_sync_to_async
+    def mark_notification_read(self, notification_id):
+        try:
+            from apps.notifications.models import Notification
+            notification = Notification.objects.filter(
+                id=notification_id,
+                recipient=self.user,
+                channel="in_app",
+            ).first()
+            if notification:
+                notification.mark_as_read()
+        except Exception as e:
+            logger.error(f"mark_notification_read error: {e}")

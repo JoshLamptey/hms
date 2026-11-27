@@ -1,0 +1,336 @@
+name: 2. Staging Build & Deploy
+
+on:
+  push:
+    branches: [develop]
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Full 40-character develop commit to build and deploy to staging
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hms-staging
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository_owner }}/hms
+
+jobs:
+  preflight:
+    name: Validate staging candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      candidate_sha: ${{ steps.candidate.outputs.candidate_sha }}
+    steps:
+      - name: Check out develop history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: develop
+          fetch-depth: 0
+
+      - name: Verify candidate belongs to develop
+        id: candidate
+        env:
+          CANDIDATE_SHA_INPUT: ${{ inputs.candidate_sha || github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "$GITHUB_REF" != "refs/heads/develop" ]]; then
+            echo "::error::Run this workflow_dispatch from develop."
+            exit 1
+          fi
+          candidate_sha="${CANDIDATE_SHA_INPUT,,}"
+          [[ "$candidate_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::candidate_sha must be a full 40-character SHA."; exit 1; }
+          git fetch --no-tags origin develop
+          git cat-file -e "$candidate_sha^{commit}"
+          git merge-base --is-ancestor "$candidate_sha" origin/develop || { echo "::error::Candidate is not contained in develop."; exit 1; }
+          echo "candidate_sha=$candidate_sha" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build production image
+    needs: preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - name: Check out candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.preflight.outputs.candidate_sha }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build image for inspection
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: infra/docker/Dockerfile
+          target: production
+          platforms: linux/amd64
+          push: false
+          provenance: false
+          sbom: false
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.preflight.outputs.candidate_sha }}
+          labels: |
+            org.opencontainers.image.title=hms
+            org.opencontainers.image.revision=${{ needs.preflight.outputs.candidate_sha }}
+          outputs: type=docker,dest=${{ runner.temp }}/hms.tar
+          cache-from: type=gha,scope=hms-production
+          cache-to: type=gha,mode=max,scope=hms-production
+
+      - name: Upload candidate image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: hms-image-${{ needs.preflight.outputs.candidate_sha }}
+          path: ${{ runner.temp }}/hms.tar
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  scan:
+    name: Verify and scan image
+    needs: [preflight, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Download candidate image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: hms-image-${{ needs.preflight.outputs.candidate_sha }}
+          path: ${{ runner.temp }}/hms
+
+      - name: Load candidate image
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.preflight.outputs.candidate_sha }}
+        run: docker load --input "${RUNNER_TEMP}/hms/hms.tar"
+
+      - name: Verify production runtime contract
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.preflight.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          test "$(docker run --rm --entrypoint id "$IMAGE" -u)" = "10001"
+          docker run --rm --entrypoint /bin/sh "$IMAGE" -ec 'test -x /usr/local/bin/start-prod.sh && test -x /usr/local/bin/entrypoint.sh && test -f /app/manage.py && test -f /app/apps/clients/management/commands/migrate_schemas.py'
+          docker run --rm --entrypoint daphne "$IMAGE" --help >/dev/null
+          docker run --rm --entrypoint celery "$IMAGE" --version
+          docker run --rm --entrypoint python "$IMAGE" --version
+
+      - name: Scan production image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.preflight.outputs.candidate_sha }}
+          scanners: vuln
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          vuln-type: os,library
+          exit-code: "1"
+
+      - name: Generate production SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          image: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ needs.preflight.outputs.candidate_sha }}
+          format: spdx-json
+          output-file: sbom-production.spdx.json
+
+      - name: Upload production SBOM
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: hms-sbom-${{ needs.preflight.outputs.candidate_sha }}
+          path: sbom-production.spdx.json
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish and sign scanned image
+    needs: [preflight, scan]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      app_digest: ${{ steps.identity.outputs.app_digest }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Download scanned image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: hms-image-${{ needs.preflight.outputs.candidate_sha }}
+          path: ${{ runner.temp }}/hms
+
+      - name: Load scanned image
+        run: docker load --input "${RUNNER_TEMP}/hms/hms.tar"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push candidate and resolve digest
+        id: identity
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          CANDIDATE_SHA: ${{ needs.preflight.outputs.candidate_sha }}
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE:sha-$CANDIDATE_SHA"
+          app_digest="$(docker buildx imagetools inspect "$IMAGE:sha-$CANDIDATE_SHA" --format '{{.Manifest.Digest}}')"
+          [[ "$app_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "app_digest=$app_digest" >> "$GITHUB_OUTPUT"
+          echo "Published $IMAGE@$app_digest"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac
+
+      - name: Sign exact image digest
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          APP_DIGEST: ${{ steps.identity.outputs.app_digest }}
+        run: cosign sign --yes "$IMAGE@$APP_DIGEST"
+
+  deploy-staging:
+    name: Deploy exact image to staging
+    needs: [preflight, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment: staging
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
+        env:
+          APP_IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.publish.outputs.app_digest }}
+          DEPLOY_SHA: ${{ needs.preflight.outputs.candidate_sha }}
+          DEPLOY_PATH: ${{ secrets.STAGING_APP_DIR }}
+          DJANGO_SETTINGS_MODULE: hms.settings.staging
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          envs: APP_IMAGE_REF,DEPLOY_SHA,DEPLOY_PATH,DJANGO_SETTINGS_MODULE,GHCR_USERNAME,GHCR_TOKEN
+          script: |
+            set -eu
+            : "${DEPLOY_PATH:?STAGING_APP_DIR is required}"
+            : "${APP_IMAGE_REF:?image digest is required}"
+            cd "$DEPLOY_PATH"
+
+            ENV_FILE=.docker.env
+            COMPOSE_FILE=infra/compose/compose.prod.yml
+            test -f "$ENV_FILE"
+            test -f "$COMPOSE_FILE"
+
+            DOCKER_CONFIG="$(mktemp -d)"
+            export DOCKER_CONFIG
+            ENV_BACKUP="$(mktemp)"
+            cp -p "$ENV_FILE" "$ENV_BACKUP"
+            PREVIOUS_SHA="$(git rev-parse HEAD)"
+            PREVIOUS_IMAGE="$(awk -F= '$1 == "APP_IMAGE" { value=substr($0, index($0, "=") + 1) } END { print value }' "$ENV_FILE")"
+            case "$PREVIOUS_IMAGE" in *@sha256:*) ;; *) PREVIOUS_IMAGE="" ;; esac
+            DEPLOY_IMAGE="$APP_IMAGE_REF"
+
+            compose() {
+              APP_IMAGE="$DEPLOY_IMAGE" DJANGO_SETTINGS_MODULE="$DJANGO_SETTINGS_MODULE" docker --config "$DOCKER_CONFIG" compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" "$@"
+            }
+
+            cleanup() {
+              status=$?
+              trap - EXIT
+              if [ "$status" -ne 0 ]; then
+                echo "Staging rollout failed; restoring the previous configuration." >&2
+                compose ps --all || true
+                compose logs --tail=150 || true
+                cp -p "$ENV_BACKUP" "$ENV_FILE" || true
+                git checkout --detach "$PREVIOUS_SHA" || true
+                if [ -n "$PREVIOUS_IMAGE" ]; then
+                  DEPLOY_IMAGE="$PREVIOUS_IMAGE"
+                  compose up -d --remove-orphans --pull never || true
+                fi
+              fi
+              rm -f "$ENV_BACKUP"
+              rm -rf "$DOCKER_CONFIG"
+              exit "$status"
+            }
+            trap cleanup EXIT
+
+            git fetch --no-tags origin "$DEPLOY_SHA"
+            git checkout --detach "$DEPLOY_SHA"
+            compose config --quiet
+            printf '%s' "$GHCR_TOKEN" | docker --config "$DOCKER_CONFIG" login ghcr.io --username "$GHCR_USERNAME" --password-stdin
+            docker --config "$DOCKER_CONFIG" pull "$APP_IMAGE_REF"
+            compose --profile jobs run --rm --pull never migrate
+            compose --profile jobs run --rm --pull never --no-deps collectstatic
+
+            tmp_file="$(mktemp)"
+            awk -v image="$APP_IMAGE_REF" 'BEGIN { updated=0 } /^APP_IMAGE=/ { if (!updated) print "APP_IMAGE=" image; updated=1; next } { print } END { if (!updated) print "APP_IMAGE=" image }' "$ENV_FILE" > "$tmp_file"
+            chmod 600 "$tmp_file"
+            mv "$tmp_file" "$ENV_FILE"
+            compose up -d --remove-orphans --pull never
+
+            APP_HOST_PORT="$(awk -F= '$1 == "APP_HOST_PORT" { value=substr($0, index($0, "=") + 1) } END { print value }' "$ENV_FILE")"
+            APP_HOST_PORT="${APP_HOST_PORT:-8000}"
+            case "$APP_HOST_PORT" in *[!0-9]*|'') echo "APP_HOST_PORT must be numeric." >&2; exit 1 ;; esac
+            curl --fail --silent --show-error --retry 12 --retry-delay 5 --retry-all-errors "http://127.0.0.1:${APP_HOST_PORT}/health/live"
+
+      - name: Check external staging readiness
+        env:
+          STAGING_BASE_URL: ${{ vars.STAGING_BASE_URL }}
+        run: |
+          set -euo pipefail
+          : "${STAGING_BASE_URL:?STAGING_BASE_URL environment variable is required}"
+          curl --fail --silent --show-error --retry 5 --retry-delay 5 --retry-all-errors "${STAGING_BASE_URL%/}/health/ready"
+
+  update-staging-alias:
+    name: Mark successfully deployed staging digest
+    needs: [preflight, publish, deploy-staging]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Move and verify staging alias
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          APP_DIGEST: ${{ needs.publish.outputs.app_digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create --prefer-index=false --tag "$IMAGE:staging" "$IMAGE@$APP_DIGEST"
+          actual_digest="$(docker buildx imagetools inspect "$IMAGE:staging" --format '{{.Manifest.Digest}}')"
+          test "$actual_digest" = "$APP_DIGEST"
+          echo "Staging now points to $IMAGE@$APP_DIGEST" >> "$GITHUB_STEP_SUMMARY"

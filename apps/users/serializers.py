@@ -5,19 +5,30 @@ from apps.users.models import User, UserGroup, UserRole
 class UserRoleSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserRole
-        fields = "__all__"
+        fields = ["id", "uid", "name", "created_at", "updated_at"]
 
 
 class UserGroupCreateUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserGroup
-        fields = "__all__"
+        fields = [
+            "id",
+            "uid",
+            "name",
+            "description",
+            "users",
+            "permissions",
+            "tenant",
+            "is_global",
+            "created_at",
+            "updated_at",
+        ]
 
 
 class UserGroupListSerializer(serializers.ModelSerializer):
     permissions = serializers.SerializerMethodField()
     users = serializers.SerializerMethodField()
-    tenants = serializers.SerializerMethodField()
+    tenant = serializers.SerializerMethodField()
 
     def get_permissions(self, obj):
         request = self.context.get("request")
@@ -25,39 +36,41 @@ class UserGroupListSerializer(serializers.ModelSerializer):
 
         perms = obj.permissions.select_related("content_type")
 
-        # Super admin sees everything
-        if user and user.role.name == "super_admin":
-            return [perm.codename for perm in perms]
+        if user and user.role and user.role.name == "SUPER_ADMIN":
+            return [
+                {
+                    "id": perm.id,
+                    "codename": perm.codename,
+                    "name": perm.name,
+                }
+                for perm in perms
+            ]
 
-        # Non-super-admin: hide client/license permissions
-        filtered_perms = [
-            perm.codename for perm in perms if perm.content_type.app_label != "clients"
-        ]
-
-        return filtered_perms
-
-    def get_users(self, obj):
-        # Reverse lookup: Get all users that belong to this group
         return [
             {
-                "id": user.id,
-                "uid": user.uid,
-                "full_name": f"{user.first_name} {user.last_name}",
+                "id": perm.id,
+                "codename": perm.codename,
+                "name": perm.name,
             }
+            for perm in perms
+            if perm.content_type.app_label != "clients"
+        ]
+
+    def get_users(self, obj):
+
+        return [
+            {"id": user.id, "uid": str(user.uid), "full_name": user.get_full_name()}
             for user in obj.users.all()
         ]
 
-    def get_tenants(self, obj):
+    def get_tenant(self, obj):
         if obj.tenant:
-            return [
-                {
-                    "id": obj.tenant.id,
-                    "uid": obj.tenant.uid,
-                    "name": obj.tenant.name,
-                }
-            ]
-        else:
-            return None
+            return {
+                "id": obj.tenant.id,
+                "uid": str(obj.tenant.uid),
+                "name": obj.tenant.name,
+            }
+        return None
 
     class Meta:
         model = UserGroup
@@ -66,9 +79,10 @@ class UserGroupListSerializer(serializers.ModelSerializer):
             "uid",
             "name",
             "description",
+            "is_global",
             "permissions",
             "users",
-            "tenants",
+            "tenant",
             "created_at",
             "updated_at",
         ]
@@ -123,49 +137,44 @@ class UserAdminUpdateSerializer(serializers.ModelSerializer):
 
 
 class UserListSerializer(serializers.ModelSerializer):
-    tenant = serializers.SerializerMethodField()
     role = serializers.SerializerMethodField()
+    tenant = serializers.SerializerMethodField()
     groups = serializers.SerializerMethodField()
-
-    def get_tenant(self, obj):
-        if obj.tenant:
-            return [
-                {
-                    "id": obj.tenant.id,
-                    "uid": obj.tenant.uid,
-                    "name": obj.tenant.name,
-                }
-            ]
-        else:
-            return None
 
     def get_role(self, obj):
         if obj.role:
-            return [
-                {
-                    "id": obj.role.id,
-                    "uid": obj.role.uid,
-                    "name": obj.role.name,
-                }
-            ]
-        else:
-            return None
+            return {
+                "id": obj.role.id,
+                "uid": str(obj.role.uid),
+                "name": obj.role.name,
+            }
+        return None
+
+    def get_tenant(self, obj):
+        if obj.tenant:
+            return {
+                "id": obj.tenant.id,
+                "uid": str(obj.tenant.uid),
+                "name": obj.tenant.name,
+            }
+        return None
 
     def get_groups(self, obj):
-        user_groups = UserGroup.objects.filter(users=obj)
+        user_groups = UserGroup.objects.filter(users=obj).prefetch_related(
+            "permissions"
+        )
 
         if user_groups.exists():
             return [
                 {
                     "id": group.id,
-                    "uid": group.uid,
+                    "uid": str(group.uid),
                     "name": group.name,
                     "permissions": [perm.codename for perm in group.permissions.all()],
                 }
                 for group in user_groups
             ]
-        else:
-            return None
+        return None
 
     class Meta:
         model = User
@@ -185,5 +194,8 @@ class UserListSerializer(serializers.ModelSerializer):
             "gender",
             "last_login",
             "is_blocked",
+            "login_enabled",
+            "password_changed",
             "created_at",
+            "updated_at",
         ]
