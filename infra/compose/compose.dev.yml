@@ -70,6 +70,7 @@ services:
     profiles: [jobs]
     restart: "no"
     command: ["/bin/sh", "-c", "python manage.py migrate --noinput && exec python manage.py migrate_schemas"]
+    volumes: ["../..:/app:cached"]
     depends_on:
       db: {condition: service_healthy}
 
